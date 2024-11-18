@@ -151,7 +151,7 @@ def start_dispatch():
         conn.close()
 
         # Inicia a thread de envio de e-mails
-        from_email = 'correios@rastreamento-pedido.com'
+        from_email = 'suporte@regularizando-pedido.site'
         from_name = 'Teste'
         password = 'Batata135-'  # Utilize variáveis de ambiente ou um método seguro de armazenar senhas
 
