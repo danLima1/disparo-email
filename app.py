@@ -151,8 +151,8 @@ def start_dispatch():
         conn.close()
 
         # Inicia a thread de envio de e-mails
-        from_email = 'suporte@regularizando-pedido.site'
-        from_name = 'Teste'
+        from_email = 'aviso@condutor-govbr.blog'
+        from_name = 'Gov'
         password = 'Batata135-'  # Utilize variáveis de ambiente ou um método seguro de armazenar senhas
 
         threading.Thread(target=send_emails_thread, args=(emails_list, subject, email_body, from_email, from_name, password, total_emails)).start()
