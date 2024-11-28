@@ -35,17 +35,28 @@ DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.
 
 # Classe User para Flask-Login
 class User(UserMixin):
-    def __init__(self, id, email, password_hash, role):
+    def __init__(self, id, email, password_hash, role, credits,
+                 smtp_server=None, smtp_port=None, email_username=None, email_password=None, from_name=None):
         self.id = id
         self.email = email
         self.password_hash = password_hash
         self.role = role
+        self.credits = credits
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self.email_username = email_username
+        self.email_password = email_password
+        self.from_name = from_name
 
 @login_manager.user_loader
 def load_user(user_id):
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute('SELECT id, email, password, role FROM users WHERE id = %s', (int(user_id),))
+    c.execute('''
+        SELECT id, email, password, role, credits, 
+               smtp_server, smtp_port, email_username, email_password, from_name 
+        FROM users WHERE id = %s
+    ''', (int(user_id),))
     user = c.fetchone()
     conn.close()
     if user:
@@ -59,18 +70,25 @@ def unauthorized_callback():
     return jsonify({'error': 'Usuário não autenticado.'}), 401
 
 # Função para enviar e-mail
-def enviar_email(subject, body, to_email, from_email, from_name, password, smtp_server="smtp.hostinger.com", smtp_port=587, user_id=None):
+def enviar_email(subject, body, to_email, user_id):
     try:
-        # Verifica se o usuário tem créditos suficientes
+        # Obter as configurações de email do usuário
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('SELECT credits FROM users WHERE id = %s FOR UPDATE', (user_id,))
+        c.execute('''
+            SELECT smtp_server, smtp_port, email_username, email_password, from_name, credits 
+            FROM users WHERE id = %s FOR UPDATE
+        ''', (user_id,))
         result = c.fetchone()
         if not result:
             conn.close()
             print("Usuário não encontrado.")
             return False
-        credits = result[0]
+        smtp_server, smtp_port, email_username, email_password, from_name, credits = result
+        if not smtp_server or not smtp_port or not email_username or not email_password:
+            conn.close()
+            print("Configuração de e-mail incompleta.")
+            return False
         if credits <= 0:
             conn.close()
             print("Créditos insuficientes.")
@@ -79,17 +97,17 @@ def enviar_email(subject, body, to_email, from_email, from_name, password, smtp_
         # Conectando ao servidor SMTP
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
-            server.login(from_email, password)
+            server.login(email_username, email_password)
 
             # Configurando o e-mail
             msg = MIMEMultipart()
-            msg['From'] = f"{from_name} <{from_email}>"
+            msg['From'] = f"{from_name} <{email_username}>" if from_name else email_username
             msg['To'] = to_email
             msg['Subject'] = subject
             msg.attach(MIMEText(body, 'html'))
 
             # Enviando o e-mail
-            server.sendmail(from_email, to_email, msg.as_string())
+            server.sendmail(email_username, to_email, msg.as_string())
             print(f"E-mail enviado para {to_email}")
 
         # Deduz um crédito do usuário
@@ -103,19 +121,20 @@ def enviar_email(subject, body, to_email, from_email, from_name, password, smtp_
         return False
 
 # Função para enviar e-mails em uma thread separada
-def send_emails_thread(emails_list, subject, body, from_email, from_name, password, total_emails, dispatch_id, user_id):
+def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     # Atualiza o status do disparo no banco de dados
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute('UPDATE dispatch SET status = %s, progress = %s, last_email = %s WHERE id = %s', ('executando', 0, '', dispatch_id))
     conn.commit()
     conn.close()
+
     for idx, to_email in enumerate(emails_list):
         # Envia o e-mail
-        success = enviar_email(subject, body, to_email, from_email, from_name, password, user_id=user_id)
+        success = enviar_email(subject, body, to_email, user_id)
         if not success:
-            # Se não for possível enviar (por falta de créditos), interrompe o envio
-            print("Interrompendo o envio por falta de créditos.")
+            # Se não for possível enviar (por falta de créditos ou configuração), interrompe o envio
+            print("Interrompendo o envio por falta de créditos ou configuração de e-mail.")
             break
         # Atualiza o progresso no banco de dados
         conn = psycopg2.connect(DATABASE_URL)
@@ -143,50 +162,26 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 email TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
-                -- Não incluímos as colunas 'role' e 'credits' aqui para evitar erros se elas já existirem
+                password TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                credits INTEGER DEFAULT 0,
+                smtp_server TEXT,
+                smtp_port INTEGER,
+                email_username TEXT,
+                email_password TEXT,
+                from_name TEXT
             )
         ''')
-
-        # Adiciona a coluna 'role' à tabela 'users', caso ainda não exista
-        c.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name='users' AND column_name='role'
-                ) THEN
-                    ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';
-                END IF;
-            END;
-            $$;
-        """)
-
-        # Adiciona a coluna 'credits' à tabela 'users', caso ainda não exista
-        c.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name='users' AND column_name='credits'
-                ) THEN
-                    ALTER TABLE users ADD COLUMN credits INTEGER DEFAULT 0;
-                END IF;
-            END;
-            $$;
-        """)
 
         # Cria a tabela 'dispatch' se não existir
         c.execute('''
             CREATE TABLE IF NOT EXISTS dispatch (
                 id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
                 status TEXT,
                 progress INTEGER,
                 total INTEGER,
-                last_email TEXT,
-                user_id INTEGER REFERENCES users(id)
+                last_email TEXT
             )
         ''')
 
@@ -194,7 +189,6 @@ def init_db():
         conn.close()
     except Exception as e:
         print(f"Erro ao inicializar o banco de dados: {e}")
-
 
 # Chama a inicialização do banco de dados
 init_db()
@@ -258,14 +252,13 @@ def login():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('SELECT id, email, password, role FROM users WHERE email = %s', (email,))
+        c.execute('SELECT id, email, password, role, credits, smtp_server, smtp_port, email_username, email_password, from_name FROM users WHERE email = %s', (email,))
         user = c.fetchone()
         if user and check_password_hash(user[2], password):
             # Login bem-sucedido
-            user_obj = User(user[0], user[1], user[2], user[3])
+            user_obj = User(*user)
             login_user(user_obj)
             conn.close()
-            # Inclui o papel do usuário na resposta
             return jsonify({'message': 'Login realizado com sucesso.', 'role': user[3]}), 200
         else:
             conn.close()
@@ -303,7 +296,14 @@ def start_dispatch():
     uploaded_file.save(file_path)
 
     # Lê os e-mails do arquivo Excel
-    emails_df = pd.read_excel(file_path)
+    try:
+        emails_df = pd.read_excel(file_path)
+    except Exception as e:
+        return jsonify({'error': f'Erro ao ler o arquivo Excel: {e}'}), 400
+
+    if 'Email' not in emails_df.columns:
+        return jsonify({'error': 'A planilha deve conter a coluna "Email".'}), 400
+
     emails_list = emails_df['Email'].dropna().tolist()
     total_emails = len(emails_list)
 
@@ -325,10 +325,7 @@ def start_dispatch():
         return jsonify({'error': f'Erro ao iniciar o disparo: {e}'}), 500
 
     # Inicia a thread de envio de e-mails
-    from_email = 'aviso@condutor-govbr.blog'  # Substitua pelo seu e-mail
-    password = 'Batata135-'  # Substitua pela sua senha ou use uma variável de ambiente
-
-    threading.Thread(target=send_emails_thread, args=(emails_list, subject, email_body, from_email, from_name, password, total_emails, dispatch_id, current_user.id)).start()
+    threading.Thread(target=send_emails_thread, args=(emails_list, subject, email_body, dispatch_id, current_user.id)).start()
 
     return jsonify({'message': 'Disparo iniciado com sucesso.', 'total': total_emails, 'dispatch_id': dispatch_id}), 200
 
@@ -372,6 +369,70 @@ def get_my_credits():
         return jsonify({'credits': result[0]}), 200
     else:
         return jsonify({'error': 'Usuário não encontrado.'}), 404
+
+# Rota para configurar o e-mail do usuário
+@app.route('/set_email_config', methods=['POST'])
+@login_required
+def set_email_config():
+    data = request.get_json()
+    smtp_server = data.get('smtp_server')
+    smtp_port = data.get('smtp_port')
+    email_username = data.get('email_username')
+    email_password = data.get('email_password')
+    from_name = data.get('from_name')
+
+    if not smtp_server or not smtp_port or not email_username or not email_password:
+        return jsonify({'status': 'error', 'message': 'Dados incompletos.'}), 400
+
+    # Atualizar as configurações de email do usuário no banco de dados
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('''
+            UPDATE users
+            SET smtp_server = %s,
+                smtp_port = %s,
+                email_username = %s,
+                email_password = %s,
+                from_name = %s
+            WHERE id = %s
+        ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user.id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return jsonify({'status': 'error', 'message': f'Erro ao atualizar configuração de email: {str(e)}'}), 500
+
+    return jsonify({'status': 'success', 'message': 'Configuração de email atualizada com sucesso.'}), 200
+
+# Rota para obter as configurações de e-mail do usuário
+@app.route('/get_email_config', methods=['GET'])
+@login_required
+def get_email_config():
+    # Obter as configurações de email do usuário
+    conn = psycopg2.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute('''
+        SELECT smtp_server, smtp_port, email_username, from_name 
+        FROM users WHERE id = %s
+    ''', (current_user.id,))
+    result = c.fetchone()
+    conn.close()
+
+    if result:
+        smtp_server, smtp_port, email_username, from_name = result
+        return jsonify({
+            'status': 'success',
+            'smtp_server': smtp_server,
+            'smtp_port': smtp_port,
+            'email_username': email_username,
+            'from_name': from_name
+        }), 200
+    else:
+        return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
+
+# Rotas de Administração para Gerenciar Créditos
 
 @app.route('/admin/users', methods=['GET'])
 @login_required
@@ -429,20 +490,45 @@ def add_credits():
     except ValueError:
         return jsonify({'error': 'Número de créditos inválido.'}), 400
 
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT credits FROM users WHERE id = %s', (user_id,))
+        result = c.fetchone()
+        if not result:
+            conn.close()
+            return jsonify({'error': 'Usuário não encontrado.'}), 404
+
+        new_credits = result[0] + credits_to_add
+        c.execute('UPDATE users SET credits = %s WHERE id = %s', (new_credits, user_id))
+        conn.commit()
+        conn.close()
+
+        return jsonify({'message': f'{credits_to_add} créditos adicionados ao usuário {user_id}. Novo saldo: {new_credits}.'}), 200
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': f'Erro ao adicionar créditos: {str(e)}'}), 500
+
+# Rota para Administradores obterem os créditos de um usuário
+@app.route('/admin/get_credits/<int:user_id>', methods=['GET'])
+@login_required
+@admin_required
+def get_credits(user_id):
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute('SELECT credits FROM users WHERE id = %s', (user_id,))
-    result = c.fetchone()
-    if not result:
-        conn.close()
-        return jsonify({'error': 'Usuário não encontrado.'}), 404
-
-    new_credits = result[0] + credits_to_add
-    c.execute('UPDATE users SET credits = %s WHERE id = %s', (new_credits, user_id))
-    conn.commit()
+    user = c.fetchone()
     conn.close()
 
-    return jsonify({'message': f'{credits_to_add} créditos adicionados ao usuário {user_id}. Novo saldo: {new_credits}.'}), 200
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Usuário não encontrado.'}), 404
 
+    return jsonify({'status': 'success', 'user_id': user_id, 'credits': user[0]}), 200
+
+
+
+# Inicializar o banco de dados
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    init_db()
+    app.run(host='0.0.0.0', port=5000, debug=True)
