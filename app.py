@@ -15,7 +15,7 @@ from functools import wraps
 from flask_login import LoginManager, login_user, login_required, logout_user, UserMixin, current_user
 
 app = Flask(__name__)
-app.secret_key = 'sua_chave_secreta'  # Substitua por uma chave secreta segura
+app.secret_key = 'GU70yhHAyQLlp-k16s-3ugHY6aDzxqP2Hkz-8qNmMlU='  # Substitua por uma chave secreta segura
 
 # Configuração de CORS para permitir credenciais
 CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
