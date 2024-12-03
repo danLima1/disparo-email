@@ -21,8 +21,8 @@ app.secret_key = 'sua_chave_secreta'  # Substitua por uma chave secreta segura
 CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
 
 # Configurações de sessão
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = True  # Certifique-se de usar HTTPS em produção
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = False
 
 # Configuração do Flask-Login
 login_manager = LoginManager()
