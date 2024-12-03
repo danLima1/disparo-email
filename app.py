@@ -18,9 +18,8 @@ app = Flask(__name__)
 app.secret_key = 'sua_chave_secreta'  # Substitua por uma chave secreta segura
 
 # Configuração de CORS para permitir credenciais
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": "https://dashboardxt.vercel.app"}}) 
 
-# Configurações de sessão
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = False
 
