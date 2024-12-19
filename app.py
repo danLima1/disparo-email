@@ -31,7 +31,7 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)  # Tempo de expiraç
 jwt = JWTManager(app)
 
 # Configuração de CORS para permitir credenciais
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://localhost:3000", "https://seu-frontend.com"]}})
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://localhost:3000", "https://disparoemailfront.vercel.app"]}})
 
 # Definir a URL do banco de dados PostgreSQL
 DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
