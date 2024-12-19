@@ -25,10 +25,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Carregar configurações de ambiente
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'sua_chave_secreta_aqui')  # Substitua por variável de ambiente
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'sua_jwt_secreta_aqui')  # Substitua por variável de ambiente
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)
+# Chave secreta para Flask e JWT
+app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta chave segura!
+
+# Configurações do JWT
+app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'  # Substitua por uma chave secreta segura
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  # Tempo de expiração do token
 app.config['JWT_ERROR_MESSAGE_KEY'] = 'error'
 app.config['JWT_BLACKLIST_ENABLED'] = False
 app.config['JWT_TOKEN_LOCATION'] = ['headers']
@@ -39,13 +41,14 @@ app.config['JWT_DECODE_ALGORITHMS'] = ['HS256']
 app.config['JWT_CSRF_CHECK_FORM'] = False
 app.config['JWT_CSRF_IN_COOKIES'] = False
 
+
 jwt = JWTManager(app)
 
-# Configuração de CORS
+# Configuração de CORS para permitir credenciais
 CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://127.0.0.1:5500", "https://disparoemailfront.vercel.app"]}})
 
-# Configuração do Banco de Dados
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://usuario:senha@host:porta/banco')  # Substitua por variável de ambiente
+# Definir a URL do banco de dados PostgreSQL
+DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
 
 # Decorador para verificar se o usuário é administrador
 def admin_required(fn):
