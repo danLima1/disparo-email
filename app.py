@@ -22,7 +22,7 @@ from email.mime.text import MIMEText
 app = Flask(__name__)
 
 # Chave secreta para Flask e JWT
-app.secret_key = 'GU70yhHAyQLlp-k16s-3ugHY6aDzxqP2Hkz-8qNmMlU='  # Mantenha esta chave segura!
+app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta chave segura!
 
 # Configurações do JWT
 app.config['JWT_SECRET_KEY'] = 'sua_jwt_secret_key_aqui'  # Substitua por uma chave secreta segura
