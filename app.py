@@ -25,19 +25,62 @@ app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta 
 # Configurações do JWT
 app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'  # Substitua por uma chave secreta segura
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  # Tempo de expiração do token
+app.config['JWT_ERROR_MESSAGE_KEY'] = 'error'
+app.config['JWT_BLACKLIST_ENABLED'] = False
+app.config['JWT_TOKEN_LOCATION'] = ['headers']
+app.config['JWT_HEADER_NAME'] = 'Authorization'
+app.config['JWT_HEADER_TYPE'] = 'Bearer'
+app.config['JWT_IDENTITY_CLAIM'] = 'sub'
+app.config['JWT_DECODE_ALGORITHMS'] = ['HS256']
+app.config['JWT_CSRF_CHECK_FORM'] = False
+app.config['JWT_CSRF_IN_COOKIES'] = False
 
 jwt = JWTManager(app)
 
+# Handler para token expirado
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'status': 'error',
+        'error': 'Token expirado. Por favor, faça login novamente.'
+    }), 401
+
+# Handler para token inválido ou com assinatura incorreta
+@jwt.invalid_token_loader
+def invalid_token_callback(error):
+    return jsonify({
+        'status': 'error',
+        'error': f'Token inválido: {error}'
+    }), 422
+
+# Handler para token ausente
+@jwt.unauthorized_loader
+def missing_token_callback(error):
+    return jsonify({
+        'status': 'error',
+        'error': 'Token de autorização não encontrado.'
+    }), 401
+
+# Handler para token revogado
+@jwt.revoked_token_loader
+def revoked_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'status': 'error',
+        'error': 'Token foi revogado.'
+    }), 401
+
+@jwt.user_lookup_error_loader
+def user_lookup_error_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'status': 'error',
+        'error': 'Erro ao buscar usuário.'
+    }), 401
+
 # Configuração de CORS para permitir credenciais
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://localhost:3000", "https://disparoemailfront.vercel.app"]}})
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://127.0.0.1:5500", "https://disparoemailfront.vercel.app"]}})
 
 # Definir a URL do banco de dados PostgreSQL
 DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
-
-# Handler para usuários não autorizados
-@jwt.unauthorized_loader
-def unauthorized_callback(callback):
-    return jsonify({'error': 'Token de autorização não encontrado.'}), 401
 
 # Decorador para verificar se o usuário é administrador
 def admin_required(fn):
@@ -234,17 +277,37 @@ def login():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('SELECT id, email, password, role, credits, smtp_server, smtp_port, email_username, email_password, from_name FROM users WHERE email = %s', (email,))
+        c.execute('SELECT id, email, password, role, credits FROM users WHERE email = %s', (email,))
         user = c.fetchone()
         conn.close()
+
         if user and check_password_hash(user[2], password):
             # Criação do token JWT com identidade como ID do usuário
-            access_token = create_access_token(identity=user[0])
-            return jsonify({'message': 'Login realizado com sucesso.', 'access_token': access_token, 'role': user[3]}), 200
+            access_token = create_access_token(
+                identity=str(user[0]),  # Convertendo para string
+                additional_claims={
+                    'email': user[1],
+                    'role': user[3]
+                }
+            )
+            
+            print(f"Token gerado para usuário {user[1]}: {access_token}")  # Log para debug
+            
+            return jsonify({
+                'message': 'Login realizado com sucesso.',
+                'access_token': access_token,
+                'role': user[3],
+                'user': {
+                    'id': user[0],
+                    'email': user[1],
+                    'credits': user[4]
+                }
+            }), 200
         else:
             return jsonify({'error': 'E-mail ou senha inválidos.'}), 400
     except Exception as e:
-        return jsonify({'error': f'Ocorreu um erro: {e}'}), 500
+        print(f"Erro no login: {str(e)}")  # Log para debug
+        return jsonify({'error': f'Ocorreu um erro: {str(e)}'}), 500
 
 # Rota para iniciar o disparo de e-mails
 @app.route('/start_dispatch', methods=['POST'])
@@ -260,7 +323,8 @@ def start_dispatch():
     from_name = request.form.get('from_name')  # Captura o nome do remetente
     uploaded_file = request.files.get('file')
 
-    if not subject or not email_body || not uploaded_file || not from_name:
+    # Corrigido: substituído '||' por 'or'
+    if not subject or not email_body or not uploaded_file or not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
     # Salva o arquivo
@@ -333,31 +397,43 @@ def get_progress():
 @app.route('/check_token', methods=['GET'])
 @jwt_required()
 def check_token():
-    current_user_id = get_jwt_identity()
-    print(f"Token válido para o usuário ID: {current_user_id}")  # Log para depuração
-
     try:
+        current_user_id = get_jwt_identity()
+        print(f"Token válido para o usuário ID: {current_user_id}")  # Log para depuração
+        print(f"Headers recebidos: {request.headers}")  # Log dos headers
+        print(f"Authorization header: {request.headers.get('Authorization')}")  # Log do token
+
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('SELECT id, email, role FROM users WHERE id = %s', (current_user_id,))
+        c.execute('SELECT id, email, role FROM users WHERE id = %s', (int(current_user_id),))  # Convertendo para int
         user = c.fetchone()
         conn.close()
 
         if user:
-            return jsonify({
+            response_data = {
                 'status': 'authenticated',
                 'user': {
                     'id': user[0],
                     'email': user[1],
                     'role': user[2]
                 }
-            }), 200
+            }
+            print(f"Resposta sendo enviada: {response_data}")  # Log da resposta
+            return jsonify(response_data), 200
         else:
-            return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
+            print(f"Usuário não encontrado para ID: {current_user_id}")  # Log de usuário não encontrado
+            return jsonify({
+                'status': 'error',
+                'message': 'Usuário não encontrado'
+            }), 404
 
     except Exception as e:
-        print(f"Erro na verificação do token: {e}")
-        return jsonify({'status': 'error', 'message': 'Erro ao verificar o token.'}), 500
+        print(f"Erro na verificação do token: {str(e)}")  # Log detalhado do erro
+        print(f"Tipo do erro: {type(e)}")  # Log do tipo do erro
+        return jsonify({
+            'status': 'error',
+            'message': f'Erro ao verificar o token: {str(e)}'
+        }), 500
 
 # Rota para obter o saldo de créditos do usuário
 @app.route('/get_my_credits', methods=['GET'])
@@ -494,7 +570,8 @@ def add_credits():
     user_id = data.get('user_id')
     credits_to_add = data.get('credits')
 
-    if not user_id || credits_to_add is None:
+    # Corrigido: substituído '||' por 'or'
+    if not user_id or credits_to_add is None:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
     try:
