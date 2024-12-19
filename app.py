@@ -1,30 +1,34 @@
+import os
+import threading
+import time
+from datetime import timedelta
+
+import pandas as pd
+import psycopg2
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required,
     get_jwt_identity
 )
-from werkzeug.security import generate_password_hash, check_password_hash
-import psycopg2
-from psycopg2 import sql, errors
-from datetime import timedelta
 from functools import wraps
-from flask_cors import CORS
-import os
-import threading
-import time
-import pandas as pd
+from psycopg2 import sql
+from werkzeug.security import generate_password_hash, check_password_hash
 import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import logging
+
+# Configuração do Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Chave secreta para Flask e JWT
-app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta chave segura!
-
-# Configurações do JWT
-app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'  # Substitua por uma chave secreta segura
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  # Tempo de expiração do token
+# Carregar configurações de ambiente
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'sua_chave_secreta_aqui')  # Substitua por variável de ambiente
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'sua_jwt_secreta_aqui')  # Substitua por variável de ambiente
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)
 app.config['JWT_ERROR_MESSAGE_KEY'] = 'error'
 app.config['JWT_BLACKLIST_ENABLED'] = False
 app.config['JWT_TOKEN_LOCATION'] = ['headers']
@@ -37,50 +41,11 @@ app.config['JWT_CSRF_IN_COOKIES'] = False
 
 jwt = JWTManager(app)
 
-# Handler para token expirado
-@jwt.expired_token_loader
-def expired_token_callback(jwt_header, jwt_payload):
-    return jsonify({
-        'status': 'error',
-        'error': 'Token expirado. Por favor, faça login novamente.'
-    }), 401
-
-# Handler para token inválido ou com assinatura incorreta
-@jwt.invalid_token_loader
-def invalid_token_callback(error):
-    return jsonify({
-        'status': 'error',
-        'error': f'Token inválido: {error}'
-    }), 422
-
-# Handler para token ausente
-@jwt.unauthorized_loader
-def missing_token_callback(error):
-    return jsonify({
-        'status': 'error',
-        'error': 'Token de autorização não encontrado.'
-    }), 401
-
-# Handler para token revogado
-@jwt.revoked_token_loader
-def revoked_token_callback(jwt_header, jwt_payload):
-    return jsonify({
-        'status': 'error',
-        'error': 'Token foi revogado.'
-    }), 401
-
-@jwt.user_lookup_error_loader
-def user_lookup_error_callback(jwt_header, jwt_payload):
-    return jsonify({
-        'status': 'error',
-        'error': 'Erro ao buscar usuário.'
-    }), 401
-
-# Configuração de CORS para permitir credenciais
+# Configuração de CORS
 CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://127.0.0.1:5500", "https://disparoemailfront.vercel.app"]}})
 
-# Definir a URL do banco de dados PostgreSQL
-DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
+# Configuração do Banco de Dados
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://usuario:senha@host:porta/banco')  # Substitua por variável de ambiente
 
 # Decorador para verificar se o usuário é administrador
 def admin_required(fn):
@@ -99,7 +64,7 @@ def admin_required(fn):
             else:
                 return jsonify({'error': 'Acesso não autorizado. Requer privilégios de administrador.'}), 403
         except Exception as e:
-            print(f"Erro ao verificar o papel do usuário: {e}")
+            logger.error(f"Erro ao verificar o papel do usuário: {e}")
             return jsonify({'error': 'Erro ao verificar privilégios de usuário.'}), 500
     return wrapper
 
@@ -116,33 +81,34 @@ def enviar_email(subject, body, to_email, user_id):
         result = c.fetchone()
         if not result:
             conn.close()
-            print("Usuário não encontrado.")
+            logger.warning("Usuário não encontrado.")
             return False
         smtp_server, smtp_port, email_username, email_password, from_name, credits = result
         if not smtp_server or not smtp_port or not email_username or not email_password:
             conn.close()
-            print("Configuração de e-mail incompleta.")
+            logger.warning("Configuração de e-mail incompleta.")
             return False
         if credits <= 0:
             conn.close()
-            print("Créditos insuficientes.")
+            logger.warning("Créditos insuficientes.")
             return False
 
-        # Conectando ao servidor SMTP
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
+        # Conectando ao servidor SMTP com SSL
+        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
             server.login(email_username, email_password)
 
             # Configurando o e-mail
-            msg = MIMEMultipart()
+            msg = MIMEMultipart('alternative')
             msg['From'] = f"{from_name} <{email_username}>" if from_name else email_username
             msg['To'] = to_email
             msg['Subject'] = subject
+            msg.add_header('Reply-To', email_username)
+            msg.add_header('X-Mailer', 'Python Flask App')
             msg.attach(MIMEText(body, 'html'))
 
             # Enviando o e-mail
             server.sendmail(email_username, to_email, msg.as_string())
-            print(f"E-mail enviado para {to_email}")
+            logger.info(f"E-mail enviado para {to_email}")
 
         # Deduz um crédito do usuário
         new_credits = credits - 1
@@ -151,41 +117,54 @@ def enviar_email(subject, body, to_email, user_id):
         conn.close()
         return True
     except Exception as e:
-        print(f"Erro ao enviar o e-mail para {to_email}: {e}")
+        logger.error(f"Erro ao enviar o e-mail para {to_email}: {e}")
         return False
 
 # Função para enviar e-mails em uma thread separada
 def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     # Atualiza o status do disparo no banco de dados
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('UPDATE dispatch SET status = %s, progress = %s, last_email = %s WHERE id = %s', ('executando', 0, '', dispatch_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('UPDATE dispatch SET status = %s, progress = %s, last_email = %s WHERE id = %s', ('executando', 0, '', dispatch_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Erro ao atualizar o status do disparo: {e}")
+        return
 
     for idx, to_email in enumerate(emails_list):
         # Envia o e-mail
         success = enviar_email(subject, body, to_email, user_id)
         if not success:
             # Se não for possível enviar (por falta de créditos ou configuração), interrompe o envio
-            print("Interrompendo o envio por falta de créditos ou configuração de e-mail.")
+            logger.warning("Interrompendo o envio por falta de créditos ou configuração de e-mail.")
             break
         # Atualiza o progresso no banco de dados
-        conn = psycopg2.connect(DATABASE_URL)
-        c = conn.cursor()
-        c.execute('UPDATE dispatch SET progress = %s, last_email = %s WHERE id = %s', (idx+1, to_email, dispatch_id))
-        conn.commit()
-        conn.close()
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            c = conn.cursor()
+            c.execute('UPDATE dispatch SET progress = %s, last_email = %s WHERE id = %s', (idx+1, to_email, dispatch_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Erro ao atualizar o progresso do disparo: {e}")
+            break
         # Aguarda 60 segundos se não for o último e-mail
         if idx < len(emails_list) - 1:
             time.sleep(60)
     # Marca o disparo como concluído
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('concluído', dispatch_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('concluído', dispatch_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Disparo {dispatch_id} concluído.")
+    except Exception as e:
+        logger.error(f"Erro ao marcar o disparo como concluído: {e}")
 
+# Função para inicializar o banco de dados
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -221,13 +200,50 @@ def init_db():
 
         conn.commit()
         conn.close()
+        logger.info("Banco de dados inicializado com sucesso.")
     except Exception as e:
-        print(f"Erro ao inicializar o banco de dados: {e}")
+        logger.error(f"Erro ao inicializar o banco de dados: {e}")
 
 # Chama a inicialização do banco de dados
 init_db()
 
-# Rota de registro
+# Handlers para JWT
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'status': 'error',
+        'error': 'Token expirado. Por favor, faça login novamente.'
+    }), 401
+
+@jwt.invalid_token_loader
+def invalid_token_callback(error):
+    return jsonify({
+        'status': 'error',
+        'error': f'Token inválido: {error}'
+    }), 422
+
+@jwt.unauthorized_loader
+def missing_token_callback(error):
+    return jsonify({
+        'status': 'error',
+        'error': 'Token de autorização não encontrado.'
+    }), 401
+
+@jwt.revoked_token_loader
+def revoked_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'status': 'error',
+        'error': 'Token foi revogado.'
+    }), 401
+
+@jwt.user_lookup_error_loader
+def user_lookup_error_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'status': 'error',
+        'error': 'Erro ao buscar usuário.'
+    }), 401
+
+# Rota de Registro
 @app.route('/register', methods=['POST'])
 def register():
     # Obter dados do formulário
@@ -252,17 +268,20 @@ def register():
         c.execute('INSERT INTO users (email, password, role) VALUES (%s, %s, %s)', (email, hashed_password, role))
         conn.commit()
         conn.close()
+        logger.info(f"Usuário registrado: {email}")
         return jsonify({'message': 'Usuário registrado com sucesso.'}), 200
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
         conn.close()
+        logger.warning(f"Tentativa de registro com e-mail existente: {email}")
         return jsonify({'error': 'Este e-mail já está cadastrado.'}), 400
     except Exception as e:
         conn.rollback()
         conn.close()
+        logger.error(f"Erro no registro de usuário: {e}")
         return jsonify({'error': f'Ocorreu um erro: {e}'}), 500
 
-# Rota de login
+# Rota de Login
 @app.route('/login', methods=['POST'])
 def login():
     # Obter dados do formulário
@@ -290,8 +309,8 @@ def login():
                     'role': user[3]
                 }
             )
-            
-            print(f"Token gerado para usuário {user[1]}: {access_token}")  # Log para debug
+
+            logger.info(f"Token gerado para usuário {user[1]}")
             
             return jsonify({
                 'message': 'Login realizado com sucesso.',
@@ -304,9 +323,10 @@ def login():
                 }
             }), 200
         else:
+            logger.warning(f"Falha no login para e-mail: {email}")
             return jsonify({'error': 'E-mail ou senha inválidos.'}), 400
     except Exception as e:
-        print(f"Erro no login: {str(e)}")  # Log para debug
+        logger.error(f"Erro no login: {str(e)}")
         return jsonify({'error': f'Ocorreu um erro: {str(e)}'}), 500
 
 # Rota para iniciar o disparo de e-mails
@@ -323,29 +343,37 @@ def start_dispatch():
     from_name = request.form.get('from_name')  # Captura o nome do remetente
     uploaded_file = request.files.get('file')
 
-    # Corrigido: substituído '||' por 'or'
+    # Validação dos dados
     if not subject or not email_body or not uploaded_file or not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
     # Salva o arquivo
-    if not os.path.exists('uploads'):
-        os.makedirs('uploads')
-    file_path = os.path.join('uploads', uploaded_file.filename)
-    uploaded_file.save(file_path)
+    try:
+        if not os.path.exists('uploads'):
+            os.makedirs('uploads')
+        file_path = os.path.join('uploads', uploaded_file.filename)
+        uploaded_file.save(file_path)
+        logger.info(f"Arquivo salvo: {file_path}")
+    except Exception as e:
+        logger.error(f"Erro ao salvar o arquivo: {e}")
+        return jsonify({'error': f'Erro ao salvar o arquivo: {e}'}), 500
 
     # Lê os e-mails do arquivo Excel
     try:
         emails_df = pd.read_excel(file_path)
     except Exception as e:
+        logger.error(f"Erro ao ler o arquivo Excel: {e}")
         return jsonify({'error': f'Erro ao ler o arquivo Excel: {e}'}), 400
 
     if 'Email' not in emails_df.columns:
+        logger.warning("Coluna 'Email' não encontrada na planilha.")
         return jsonify({'error': 'A planilha deve conter a coluna "Email".'}), 400
 
     emails_list = emails_df['Email'].dropna().tolist()
     total_emails = len(emails_list)
 
     if total_emails == 0:
+        logger.warning("Nenhum e-mail encontrado na planilha.")
         return jsonify({'error': 'Nenhum e-mail encontrado na planilha.'}), 400
 
     # Insere um novo disparo no banco de dados associado ao usuário
@@ -357,9 +385,11 @@ def start_dispatch():
         dispatch_id = c.fetchone()[0]
         conn.commit()
         conn.close()
+        logger.info(f"Disparo iniciado: ID {dispatch_id} para usuário {user_id}")
     except Exception as e:
         conn.rollback()
         conn.close()
+        logger.error(f"Erro ao iniciar o disparo: {e}")
         return jsonify({'error': f'Erro ao iniciar o disparo: {e}'}), 500
 
     # Inicia a thread de envio de e-mails
@@ -388,9 +418,10 @@ def get_progress():
                 'last_email': last_email
             }), 200
         else:
+            logger.warning(f"Nenhum disparo encontrado para o usuário ID: {current_user_id}")
             return jsonify({'error': 'Nenhum disparo encontrado.'}), 404
     except Exception as e:
-        print(f"Erro ao obter o progresso: {e}")
+        logger.error(f"Erro ao obter o progresso: {e}")
         return jsonify({'error': 'Erro ao obter o progresso.'}), 500
 
 # Rota para verificar o token
@@ -399,9 +430,9 @@ def get_progress():
 def check_token():
     try:
         current_user_id = get_jwt_identity()
-        print(f"Token válido para o usuário ID: {current_user_id}")  # Log para depuração
-        print(f"Headers recebidos: {request.headers}")  # Log dos headers
-        print(f"Authorization header: {request.headers.get('Authorization')}")  # Log do token
+        logger.info(f"Token válido para o usuário ID: {current_user_id}")
+        logger.debug(f"Headers recebidos: {request.headers}")
+        logger.debug(f"Authorization header: {request.headers.get('Authorization')}")
 
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
@@ -418,18 +449,18 @@ def check_token():
                     'role': user[2]
                 }
             }
-            print(f"Resposta sendo enviada: {response_data}")  # Log da resposta
+            logger.info(f"Resposta sendo enviada: {response_data}")
             return jsonify(response_data), 200
         else:
-            print(f"Usuário não encontrado para ID: {current_user_id}")  # Log de usuário não encontrado
+            logger.warning(f"Usuário não encontrado para ID: {current_user_id}")
             return jsonify({
                 'status': 'error',
                 'message': 'Usuário não encontrado'
             }), 404
 
     except Exception as e:
-        print(f"Erro na verificação do token: {str(e)}")  # Log detalhado do erro
-        print(f"Tipo do erro: {type(e)}")  # Log do tipo do erro
+        logger.error(f"Erro na verificação do token: {str(e)}")
+        logger.debug(f"Tipo do erro: {type(e)}")
         return jsonify({
             'status': 'error',
             'message': f'Erro ao verificar o token: {str(e)}'
@@ -449,12 +480,13 @@ def get_my_credits():
         if result:
             return jsonify({'credits': result[0]}), 200
         else:
+            logger.warning(f"Usuário não encontrado para ID: {current_user_id}")
             return jsonify({'error': 'Usuário não encontrado.'}), 404
     except Exception as e:
-        print(f"Erro ao obter créditos: {e}")
+        logger.error(f"Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
-# Rota para configurar o e-mail do usuário (corrigida)
+# Rota para configurar o e-mail do usuário
 @app.route('/set_email_config', methods=['POST'])
 @jwt_required()
 def set_email_config():
@@ -466,6 +498,7 @@ def set_email_config():
     from_name = data.get('from_name')
 
     if not smtp_server or not smtp_port or not email_username or not email_password:
+        logger.warning("Dados de configuração de e-mail incompletos.")
         return jsonify({'status': 'error', 'message': 'Dados incompletos.'}), 400
 
     # Obtenha a identidade do usuário a partir do token
@@ -486,9 +519,11 @@ def set_email_config():
         ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user_id))
         conn.commit()
         conn.close()
+        logger.info(f"Configuração de e-mail atualizada para o usuário ID: {current_user_id}")
     except Exception as e:
         conn.rollback()
         conn.close()
+        logger.error(f"Erro ao atualizar configuração de email: {e}")
         return jsonify({'status': 'error', 'message': f'Erro ao atualizar configuração de email: {str(e)}'}), 500
 
     return jsonify({'status': 'success', 'message': 'Configuração de email atualizada com sucesso.'}), 200
@@ -519,10 +554,11 @@ def get_email_config():
                 'from_name': from_name
             }), 200
         else:
+            logger.warning(f"Usuário não encontrado para ID: {current_user_id}")
             return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
 
     except Exception as e:
-        print(f"Erro ao obter configuração de email: {e}")
+        logger.error(f"Erro ao obter configuração de email: {e}")
         return jsonify({'status': 'error', 'message': 'Erro ao obter configuração de email.'}), 500
 
 # Rotas de Administração para Gerenciar Créditos
@@ -550,16 +586,15 @@ def get_users():
         # Converte os resultados em uma lista de dicionários
         users_list = [{'id': user[0], 'email': user[1], 'credits': user[2]} for user in users]
         
+        logger.info(f"Usuários recuperados: {len(users_list)}")
         return jsonify(users_list), 200
 
     except psycopg2.Error as e:
-        # Log do erro (pode ser aprimorado para usar logging)
-        print(f"Erro ao conectar ao banco de dados: {e}")
+        logger.error(f"Erro ao conectar ao banco de dados: {e}")
         return jsonify({'error': 'Erro interno do servidor.'}), 500
 
     except Exception as e:
-        # Log de outros erros
-        print(f"Erro inesperado: {e}")
+        logger.error(f"Erro inesperado: {e}")
         return jsonify({'error': 'Ocorreu um erro inesperado.'}), 500
 
 # Rota para o administrador adicionar créditos a um usuário
@@ -570,15 +605,18 @@ def add_credits():
     user_id = data.get('user_id')
     credits_to_add = data.get('credits')
 
-    # Corrigido: substituído '||' por 'or'
+    # Validação dos dados
     if not user_id or credits_to_add is None:
+        logger.warning("Dados de adição de créditos incompletos.")
         return jsonify({'error': 'Dados incompletos.'}), 400
 
     try:
         credits_to_add = int(credits_to_add)
         if credits_to_add <= 0:
+            logger.warning("Número de créditos inválido para adição.")
             return jsonify({'error': 'O número de créditos deve ser positivo.'}), 400
     except ValueError:
+        logger.warning("Número de créditos inválido fornecido.")
         return jsonify({'error': 'Número de créditos inválido.'}), 400
 
     try:
@@ -588,6 +626,7 @@ def add_credits():
         result = c.fetchone()
         if not result:
             conn.close()
+            logger.warning(f"Usuário não encontrado para ID: {user_id}")
             return jsonify({'error': 'Usuário não encontrado.'}), 404
 
         new_credits = result[0] + credits_to_add
@@ -595,10 +634,12 @@ def add_credits():
         conn.commit()
         conn.close()
 
+        logger.info(f"{credits_to_add} créditos adicionados ao usuário {user_id}. Novo saldo: {new_credits}.")
         return jsonify({'message': f'{credits_to_add} créditos adicionados ao usuário {user_id}. Novo saldo: {new_credits}.'}), 200
     except Exception as e:
         conn.rollback()
         conn.close()
+        logger.error(f"Erro ao adicionar créditos: {e}")
         return jsonify({'error': f'Erro ao adicionar créditos: {str(e)}'}), 500
 
 # Rota para Administradores obterem os créditos de um usuário
@@ -613,14 +654,18 @@ def get_credits(user_id):
         conn.close()
 
         if not user:
+            logger.warning(f"Usuário não encontrado para ID: {user_id}")
             return jsonify({'status': 'error', 'message': 'Usuário não encontrado.'}), 404
 
+        logger.info(f"Créditos do usuário {user_id} recuperados: {user[0]}")
         return jsonify({'status': 'success', 'user_id': user_id, 'credits': user[0]}), 200
     except Exception as e:
-        print(f"Erro ao obter créditos: {e}")
+        logger.error(f"Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
-# Inicializar o banco de dados
+# Inicializar o banco de dados e iniciar o servidor
 if __name__ == '__main__':
+    # Inicializar o banco de dados novamente para garantir que está atualizado
     init_db()
+    # Executar a aplicação Flask
     app.run(host='0.0.0.0', port=5000, debug=True)
