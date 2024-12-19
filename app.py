@@ -1,5 +1,3 @@
-# app.py
-
 from flask import Flask, request, jsonify
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required,
@@ -342,6 +340,7 @@ def get_progress():
 @jwt_required()
 def check_token():
     current_user = get_jwt_identity()
+    print(f"Token válido para o usuário: {current_user}")  # Adicione este log para depuração
     return jsonify({'status': 'authenticated', 'user': current_user}), 200
 
 # Rota para obter o saldo de créditos do usuário
@@ -360,7 +359,7 @@ def get_my_credits():
     else:
         return jsonify({'error': 'Usuário não encontrado.'}), 404
 
-# Rota para configurar o e-mail do usuário
+# Rota para configurar o e-mail do usuário (corrigida)
 @app.route('/set_email_config', methods=['POST'])
 @jwt_required()
 def set_email_config():
@@ -373,6 +372,9 @@ def set_email_config():
 
     if not smtp_server or not smtp_port or not email_username or not email_password:
         return jsonify({'status': 'error', 'message': 'Dados incompletos.'}), 400
+
+    # Obtenha a identidade do usuário a partir do token
+    current_user = get_jwt_identity()
 
     # Atualizar as configurações de email do usuário no banco de dados
     try:
