@@ -34,21 +34,6 @@ CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://loca
 # Definir a URL do banco de dados PostgreSQL
 DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
 
-# Classe User (opcional, útil para manipulação interna)
-class User:
-    def __init__(self, id, email, password_hash, role, credits,
-                 smtp_server=None, smtp_port=None, email_username=None, email_password=None, from_name=None):
-        self.id = id
-        self.email = email
-        self.password_hash = password_hash
-        self.role = role
-        self.credits = credits
-        self.smtp_server = smtp_server
-        self.smtp_port = smtp_port
-        self.email_username = email_username
-        self.email_password = email_password
-        self.from_name = from_name
-
 # Handler para usuários não autorizados
 @jwt.unauthorized_loader
 def unauthorized_callback(callback):
@@ -59,10 +44,20 @@ def admin_required(fn):
     @wraps(fn)
     @jwt_required()
     def wrapper(*args, **kwargs):
-        current_user = get_jwt_identity()
-        if current_user['role'] != 'admin':
-            return jsonify({'error': 'Acesso não autorizado. Requer privilégios de administrador.'}), 403
-        return fn(*args, **kwargs)
+        current_user_id = get_jwt_identity()
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            c = conn.cursor()
+            c.execute('SELECT role FROM users WHERE id = %s', (current_user_id,))
+            result = c.fetchone()
+            conn.close()
+            if result and result[0] == 'admin':
+                return fn(*args, **kwargs)
+            else:
+                return jsonify({'error': 'Acesso não autorizado. Requer privilégios de administrador.'}), 403
+        except Exception as e:
+            print(f"Erro ao verificar o papel do usuário: {e}")
+            return jsonify({'error': 'Erro ao verificar privilégios de usuário.'}), 500
     return wrapper
 
 # Função para enviar e-mail
@@ -243,12 +238,8 @@ def login():
         user = c.fetchone()
         conn.close()
         if user and check_password_hash(user[2], password):
-            # Criação do token JWT
-            access_token = create_access_token(identity={
-                'id': user[0],
-                'email': user[1],
-                'role': user[3]
-            })
+            # Criação do token JWT com identidade como ID do usuário
+            access_token = create_access_token(identity=user[0])
             return jsonify({'message': 'Login realizado com sucesso.', 'access_token': access_token, 'role': user[3]}), 200
         else:
             return jsonify({'error': 'E-mail ou senha inválidos.'}), 400
@@ -261,7 +252,7 @@ def login():
 def start_dispatch():
     # Obter a identidade do usuário a partir do token
     current_user = get_jwt_identity()
-    user_id = current_user['id']
+    user_id = current_user
 
     # Obtém os dados do request
     subject = request.form.get('subject')
@@ -269,7 +260,7 @@ def start_dispatch():
     from_name = request.form.get('from_name')  # Captura o nome do remetente
     uploaded_file = request.files.get('file')
 
-    if not subject or not email_body or not uploaded_file or not from_name:
+    if not subject or not email_body || not uploaded_file || not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
     # Salva o arquivo
@@ -316,48 +307,76 @@ def start_dispatch():
 @app.route('/progress', methods=['GET'])
 @jwt_required()
 def get_progress():
-    current_user = get_jwt_identity()
-    user_id = current_user['id']
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('SELECT id, status, progress, total, last_email FROM dispatch WHERE user_id = %s ORDER BY id DESC LIMIT 1', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    if result:
-        dispatch_id, status, progress, total, last_email = result
-        return jsonify({
-            'dispatch_id': dispatch_id,
-            'status': status,
-            'progress': progress,
-            'total': total,
-            'last_email': last_email
-        }), 200
-    else:
-        return jsonify({'error': 'Nenhum disparo encontrado.'}), 404
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT id, status, progress, total, last_email FROM dispatch WHERE user_id = %s ORDER BY id DESC LIMIT 1', (current_user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result:
+            dispatch_id, status, progress, total, last_email = result
+            return jsonify({
+                'dispatch_id': dispatch_id,
+                'status': status,
+                'progress': progress,
+                'total': total,
+                'last_email': last_email
+            }), 200
+        else:
+            return jsonify({'error': 'Nenhum disparo encontrado.'}), 404
+    except Exception as e:
+        print(f"Erro ao obter o progresso: {e}")
+        return jsonify({'error': 'Erro ao obter o progresso.'}), 500
 
 # Rota para verificar o token
 @app.route('/check_token', methods=['GET'])
 @jwt_required()
 def check_token():
-    current_user = get_jwt_identity()
-    print(f"Token válido para o usuário: {current_user}")  # Adicione este log para depuração
-    return jsonify({'status': 'authenticated', 'user': current_user}), 200
+    current_user_id = get_jwt_identity()
+    print(f"Token válido para o usuário ID: {current_user_id}")  # Log para depuração
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT id, email, role FROM users WHERE id = %s', (current_user_id,))
+        user = c.fetchone()
+        conn.close()
+
+        if user:
+            return jsonify({
+                'status': 'authenticated',
+                'user': {
+                    'id': user[0],
+                    'email': user[1],
+                    'role': user[2]
+                }
+            }), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
+
+    except Exception as e:
+        print(f"Erro na verificação do token: {e}")
+        return jsonify({'status': 'error', 'message': 'Erro ao verificar o token.'}), 500
 
 # Rota para obter o saldo de créditos do usuário
 @app.route('/get_my_credits', methods=['GET'])
 @jwt_required()
 def get_my_credits():
-    current_user = get_jwt_identity()
-    user_id = current_user['id']
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('SELECT credits FROM users WHERE id = %s', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    if result:
-        return jsonify({'credits': result[0]}), 200
-    else:
-        return jsonify({'error': 'Usuário não encontrado.'}), 404
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT credits FROM users WHERE id = %s', (current_user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result:
+            return jsonify({'credits': result[0]}), 200
+        else:
+            return jsonify({'error': 'Usuário não encontrado.'}), 404
+    except Exception as e:
+        print(f"Erro ao obter créditos: {e}")
+        return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
 # Rota para configurar o e-mail do usuário (corrigida)
 @app.route('/set_email_config', methods=['POST'])
@@ -374,7 +393,7 @@ def set_email_config():
         return jsonify({'status': 'error', 'message': 'Dados incompletos.'}), 400
 
     # Obtenha a identidade do usuário a partir do token
-    current_user = get_jwt_identity()
+    current_user_id = get_jwt_identity()
 
     # Atualizar as configurações de email do usuário no banco de dados
     try:
@@ -388,7 +407,7 @@ def set_email_config():
                 email_password = %s,
                 from_name = %s
             WHERE id = %s
-        ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user['id']))
+        ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user_id))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -403,28 +422,32 @@ def set_email_config():
 @jwt_required()
 def get_email_config():
     # Obter as configurações de email do usuário
-    current_user = get_jwt_identity()
-    user_id = current_user['id']
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('''
-        SELECT smtp_server, smtp_port, email_username, from_name 
-        FROM users WHERE id = %s
-    ''', (user_id,))
-    result = c.fetchone()
-    conn.close()
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('''
+            SELECT smtp_server, smtp_port, email_username, from_name 
+            FROM users WHERE id = %s
+        ''', (current_user_id,))
+        result = c.fetchone()
+        conn.close()
 
-    if result:
-        smtp_server, smtp_port, email_username, from_name = result
-        return jsonify({
-            'status': 'success',
-            'smtp_server': smtp_server,
-            'smtp_port': smtp_port,
-            'email_username': email_username,
-            'from_name': from_name
-        }), 200
-    else:
-        return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
+        if result:
+            smtp_server, smtp_port, email_username, from_name = result
+            return jsonify({
+                'status': 'success',
+                'smtp_server': smtp_server,
+                'smtp_port': smtp_port,
+                'email_username': email_username,
+                'from_name': from_name
+            }), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
+
+    except Exception as e:
+        print(f"Erro ao obter configuração de email: {e}")
+        return jsonify({'status': 'error', 'message': 'Erro ao obter configuração de email.'}), 500
 
 # Rotas de Administração para Gerenciar Créditos
 @app.route('/admin/users', methods=['GET'])
@@ -471,7 +494,7 @@ def add_credits():
     user_id = data.get('user_id')
     credits_to_add = data.get('credits')
 
-    if not user_id or credits_to_add is None:
+    if not user_id || credits_to_add is None:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
     try:
@@ -505,16 +528,20 @@ def add_credits():
 @app.route('/admin/get_credits/<int:user_id>', methods=['GET'])
 @admin_required
 def get_credits(user_id):
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('SELECT credits FROM users WHERE id = %s', (user_id,))
-    user = c.fetchone()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT credits FROM users WHERE id = %s', (user_id,))
+        user = c.fetchone()
+        conn.close()
 
-    if not user:
-        return jsonify({'status': 'error', 'message': 'Usuário não encontrado.'}), 404
+        if not user:
+            return jsonify({'status': 'error', 'message': 'Usuário não encontrado.'}), 404
 
-    return jsonify({'status': 'success', 'user_id': user_id, 'credits': user[0]}), 200
+        return jsonify({'status': 'success', 'user_id': user_id, 'credits': user[0]}), 200
+    except Exception as e:
+        print(f"Erro ao obter créditos: {e}")
+        return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
 # Inicializar o banco de dados
 if __name__ == '__main__':
