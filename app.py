@@ -25,8 +25,8 @@ app = Flask(__name__)
 app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta chave segura!
 
 # Configurações do JWT
-app.config['JWT_SECRET_KEY'] = 'sua_jwt_secret_key_aqui'  # Substitua por uma chave secreta segura
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)  # Tempo de expiração do token
+app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'  # Substitua por uma chave secreta segura
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  # Tempo de expiração do token
 
 jwt = JWTManager(app)
 
