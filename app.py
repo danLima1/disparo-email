@@ -78,7 +78,7 @@ def enviar_email(subject, body, to_email, user_id):
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('''
-            SELECT smtp_server, smtp_port, email_username, email_password, from_name, credits 
+            SELECT smtp_server, smtp_port, email_username, email_password, from_name, use_ssl, credits 
             FROM users WHERE id = %s FOR UPDATE
         ''', (user_id,))
         result = c.fetchone()
@@ -86,7 +86,7 @@ def enviar_email(subject, body, to_email, user_id):
             conn.close()
             logger.warning("Usuário não encontrado.")
             return False
-        smtp_server, smtp_port, email_username, email_password, from_name, credits = result
+        smtp_server, smtp_port, email_username, email_password, from_name, use_ssl, credits = result
         if not smtp_server or not smtp_port or not email_username or not email_password:
             conn.close()
             logger.warning("Configuração de e-mail incompleta.")
@@ -96,8 +96,20 @@ def enviar_email(subject, body, to_email, user_id):
             logger.warning("Créditos insuficientes.")
             return False
 
-        # Conectando ao servidor SMTP com SSL
-        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+        # Escolha o protocolo com base na configuração
+        if use_ssl:
+            server_class = smtplib.SMTP_SSL
+            server_args = (smtp_server, smtp_port)
+        else:
+            server_class = smtplib.SMTP
+            server_args = (smtp_server, smtp_port)
+
+        # Conectando ao servidor SMTP
+        with server_class(*server_args) as server:
+            if not use_ssl:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
             server.login(email_username, email_password)
 
             # Configurando o e-mail
@@ -185,7 +197,8 @@ def init_db():
                 smtp_port INTEGER,
                 email_username TEXT,
                 email_password TEXT,
-                from_name TEXT
+                from_name TEXT,
+                use_ssl BOOLEAN DEFAULT TRUE
             )
         ''')
 
@@ -314,7 +327,7 @@ def login():
             )
 
             logger.info(f"Token gerado para usuário {user[1]}")
-            
+
             return jsonify({
                 'message': 'Login realizado com sucesso.',
                 'access_token': access_token,
@@ -499,6 +512,7 @@ def set_email_config():
     email_username = data.get('email_username')
     email_password = data.get('email_password')
     from_name = data.get('from_name')
+    use_ssl = data.get('use_ssl', True)  # Novo campo para escolher o protocolo
 
     if not smtp_server or not smtp_port or not email_username or not email_password:
         logger.warning("Dados de configuração de e-mail incompletos.")
@@ -517,9 +531,10 @@ def set_email_config():
                 smtp_port = %s,
                 email_username = %s,
                 email_password = %s,
-                from_name = %s
+                from_name = %s,
+                use_ssl = %s
             WHERE id = %s
-        ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user_id))
+        ''', (smtp_server, smtp_port, email_username, email_password, from_name, use_ssl, current_user_id))
         conn.commit()
         conn.close()
         logger.info(f"Configuração de e-mail atualizada para o usuário ID: {current_user_id}")
@@ -541,20 +556,21 @@ def get_email_config():
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('''
-            SELECT smtp_server, smtp_port, email_username, from_name 
+            SELECT smtp_server, smtp_port, email_username, from_name, use_ssl
             FROM users WHERE id = %s
         ''', (current_user_id,))
         result = c.fetchone()
         conn.close()
 
         if result:
-            smtp_server, smtp_port, email_username, from_name = result
+            smtp_server, smtp_port, email_username, from_name, use_ssl = result
             return jsonify({
                 'status': 'success',
                 'smtp_server': smtp_server,
                 'smtp_port': smtp_port,
                 'email_username': email_username,
-                'from_name': from_name
+                'from_name': from_name,
+                'use_ssl': use_ssl
             }), 200
         else:
             logger.warning(f"Usuário não encontrado para ID: {current_user_id}")
