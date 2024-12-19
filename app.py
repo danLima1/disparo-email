@@ -1,39 +1,43 @@
-from flask import Flask, request, jsonify, session
+# app.py
+
+from flask import Flask, request, jsonify
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required,
+    get_jwt_identity
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+import psycopg2
+from psycopg2 import sql, errors
+from datetime import timedelta
+from functools import wraps
+from flask_cors import CORS
+import os
 import threading
 import time
 import pandas as pd
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import psycopg2
-from psycopg2 import sql, errors
-import os
-from flask_cors import CORS  # Importante para lidar com CORS
-from werkzeug.security import generate_password_hash, check_password_hash
-import uuid
-from functools import wraps
-from flask_login import LoginManager, login_user, login_required, logout_user, UserMixin, current_user
 
 app = Flask(__name__)
-app.secret_key = 'GU70yhHAyQLlp-k16s-3ugHY6aDzxqP2Hkz-8qNmMlU='  # Substitua por uma chave secreta segura
+
+# Chave secreta para Flask e JWT
+app.secret_key = 'GU70yhHAyQLlp-k16s-3ugHY6aDzxqP2Hkz-8qNmMlU='  # Mantenha esta chave segura!
+
+# Configurações do JWT
+app.config['JWT_SECRET_KEY'] = 'sua_jwt_secret_key_aqui'  # Substitua por uma chave secreta segura
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)  # Tempo de expiração do token
+
+jwt = JWTManager(app)
 
 # Configuração de CORS para permitir credenciais
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
-
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = False
-
-# Configuração do Flask-Login
-login_manager = LoginManager()
-login_manager.init_app(app)
-# Remover ou comentar a linha abaixo para evitar redirecionamentos automáticos
-# login_manager.login_view = 'login'
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://localhost:3000", "https://seu-frontend.com"]}})
 
 # Definir a URL do banco de dados PostgreSQL
 DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
 
-# Classe User para Flask-Login
-class User(UserMixin):
+# Classe User (opcional, útil para manipulação interna)
+class User:
     def __init__(self, id, email, password_hash, role, credits,
                  smtp_server=None, smtp_port=None, email_username=None, email_password=None, from_name=None):
         self.id = id
@@ -47,26 +51,21 @@ class User(UserMixin):
         self.email_password = email_password
         self.from_name = from_name
 
-@login_manager.user_loader
-def load_user(user_id):
-    conn = psycopg2.connect(DATABASE_URL)
-    c = conn.cursor()
-    c.execute('''
-        SELECT id, email, password, role, credits, 
-               smtp_server, smtp_port, email_username, email_password, from_name 
-        FROM users WHERE id = %s
-    ''', (int(user_id),))
-    user = c.fetchone()
-    conn.close()
-    if user:
-        return User(*user)
-    else:
-        return None
-
 # Handler para usuários não autorizados
-@login_manager.unauthorized_handler
-def unauthorized_callback():
-    return jsonify({'error': 'Usuário não autenticado.'}), 401
+@jwt.unauthorized_loader
+def unauthorized_callback(callback):
+    return jsonify({'error': 'Token de autorização não encontrado.'}), 401
+
+# Decorador para verificar se o usuário é administrador
+def admin_required(fn):
+    @wraps(fn)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        current_user = get_jwt_identity()
+        if current_user['role'] != 'admin':
+            return jsonify({'error': 'Acesso não autorizado. Requer privilégios de administrador.'}), 403
+        return fn(*args, **kwargs)
+    return wrapper
 
 # Função para enviar e-mail
 def enviar_email(subject, body, to_email, user_id):
@@ -192,15 +191,6 @@ def init_db():
 # Chama a inicialização do banco de dados
 init_db()
 
-# Decorador para verificar se o usuário é administrador
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated or current_user.role != 'admin':
-            return jsonify({'error': 'Acesso não autorizado. Requer privilégios de administrador.'}), 403
-        return f(*args, **kwargs)
-    return decorated_function
-
 # Rota de registro
 @app.route('/register', methods=['POST'])
 def register():
@@ -253,36 +243,32 @@ def login():
         c = conn.cursor()
         c.execute('SELECT id, email, password, role, credits, smtp_server, smtp_port, email_username, email_password, from_name FROM users WHERE email = %s', (email,))
         user = c.fetchone()
+        conn.close()
         if user and check_password_hash(user[2], password):
-            # Login bem-sucedido
-            user_obj = User(*user)
-            login_user(user_obj)
-            conn.close()
-            return jsonify({'message': 'Login realizado com sucesso.', 'role': user[3]}), 200
+            # Criação do token JWT
+            access_token = create_access_token(identity={
+                'id': user[0],
+                'email': user[1],
+                'role': user[3]
+            })
+            return jsonify({'message': 'Login realizado com sucesso.', 'access_token': access_token, 'role': user[3]}), 200
         else:
-            conn.close()
             return jsonify({'error': 'E-mail ou senha inválidos.'}), 400
     except Exception as e:
-        conn.rollback()
-        conn.close()
         return jsonify({'error': f'Ocorreu um erro: {e}'}), 500
-
-# Rota de logout
-@app.route('/logout', methods=['POST'])
-@login_required
-def logout():
-    logout_user()
-    return jsonify({'message': 'Logout realizado com sucesso.'}), 200
 
 # Rota para iniciar o disparo de e-mails
 @app.route('/start_dispatch', methods=['POST'])
-@login_required
+@jwt_required()
 def start_dispatch():
+    # Obter a identidade do usuário a partir do token
+    current_user = get_jwt_identity()
+    user_id = current_user['id']
+
     # Obtém os dados do request
-    data = request.form
-    subject = data.get('subject')
-    email_body = data.get('email_body')
-    from_name = data.get('from_name')  # Captura o nome do remetente
+    subject = request.form.get('subject')
+    email_body = request.form.get('email_body')
+    from_name = request.form.get('from_name')  # Captura o nome do remetente
     uploaded_file = request.files.get('file')
 
     if not subject or not email_body or not uploaded_file or not from_name:
@@ -314,7 +300,7 @@ def start_dispatch():
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('INSERT INTO dispatch (user_id, status, progress, total, last_email) VALUES (%s, %s, %s, %s, %s) RETURNING id',
-                  (current_user.id, 'pendente', 0, total_emails, ''))
+                  (user_id, 'pendente', 0, total_emails, ''))
         dispatch_id = c.fetchone()[0]
         conn.commit()
         conn.close()
@@ -324,17 +310,19 @@ def start_dispatch():
         return jsonify({'error': f'Erro ao iniciar o disparo: {e}'}), 500
 
     # Inicia a thread de envio de e-mails
-    threading.Thread(target=send_emails_thread, args=(emails_list, subject, email_body, dispatch_id, current_user.id)).start()
+    threading.Thread(target=send_emails_thread, args=(emails_list, subject, email_body, dispatch_id, user_id)).start()
 
     return jsonify({'message': 'Disparo iniciado com sucesso.', 'total': total_emails, 'dispatch_id': dispatch_id}), 200
 
 # Rota para obter o progresso do último disparo do usuário
 @app.route('/progress', methods=['GET'])
-@login_required
+@jwt_required()
 def get_progress():
+    current_user = get_jwt_identity()
+    user_id = current_user['id']
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute('SELECT id, status, progress, total, last_email FROM dispatch WHERE user_id = %s ORDER BY id DESC LIMIT 1', (current_user.id,))
+    c.execute('SELECT id, status, progress, total, last_email FROM dispatch WHERE user_id = %s ORDER BY id DESC LIMIT 1', (user_id,))
     result = c.fetchone()
     conn.close()
     if result:
@@ -349,19 +337,22 @@ def get_progress():
     else:
         return jsonify({'error': 'Nenhum disparo encontrado.'}), 404
 
-# Rota para verificar a sessão
-@app.route('/check_session', methods=['GET'])
-@login_required
-def check_session():
-    return jsonify({'status': 'authenticated', 'role': current_user.role}), 200
+# Rota para verificar o token
+@app.route('/check_token', methods=['GET'])
+@jwt_required()
+def check_token():
+    current_user = get_jwt_identity()
+    return jsonify({'status': 'authenticated', 'user': current_user}), 200
 
 # Rota para obter o saldo de créditos do usuário
 @app.route('/get_my_credits', methods=['GET'])
-@login_required
+@jwt_required()
 def get_my_credits():
+    current_user = get_jwt_identity()
+    user_id = current_user['id']
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute('SELECT credits FROM users WHERE id = %s', (current_user.id,))
+    c.execute('SELECT credits FROM users WHERE id = %s', (user_id,))
     result = c.fetchone()
     conn.close()
     if result:
@@ -371,7 +362,7 @@ def get_my_credits():
 
 # Rota para configurar o e-mail do usuário
 @app.route('/set_email_config', methods=['POST'])
-@login_required
+@jwt_required()
 def set_email_config():
     data = request.get_json()
     smtp_server = data.get('smtp_server')
@@ -395,7 +386,7 @@ def set_email_config():
                 email_password = %s,
                 from_name = %s
             WHERE id = %s
-        ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user.id))
+        ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user['id']))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -407,15 +398,17 @@ def set_email_config():
 
 # Rota para obter as configurações de e-mail do usuário
 @app.route('/get_email_config', methods=['GET'])
-@login_required
+@jwt_required()
 def get_email_config():
     # Obter as configurações de email do usuário
+    current_user = get_jwt_identity()
+    user_id = current_user['id']
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute('''
         SELECT smtp_server, smtp_port, email_username, from_name 
         FROM users WHERE id = %s
-    ''', (current_user.id,))
+    ''', (user_id,))
     result = c.fetchone()
     conn.close()
 
@@ -432,9 +425,7 @@ def get_email_config():
         return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
 
 # Rotas de Administração para Gerenciar Créditos
-
 @app.route('/admin/users', methods=['GET'])
-@login_required
 @admin_required
 def get_users():
     try:
@@ -472,7 +463,6 @@ def get_users():
 
 # Rota para o administrador adicionar créditos a um usuário
 @app.route('/admin/add_credits', methods=['POST'])
-@login_required
 @admin_required
 def add_credits():
     data = request.get_json()
@@ -511,7 +501,6 @@ def add_credits():
 
 # Rota para Administradores obterem os créditos de um usuário
 @app.route('/admin/get_credits/<int:user_id>', methods=['GET'])
-@login_required
 @admin_required
 def get_credits(user_id):
     conn = psycopg2.connect(DATABASE_URL)
@@ -524,8 +513,6 @@ def get_credits(user_id):
         return jsonify({'status': 'error', 'message': 'Usuário não encontrado.'}), 404
 
     return jsonify({'status': 'success', 'user_id': user_id, 'credits': user[0]}), 200
-
-
 
 # Inicializar o banco de dados
 if __name__ == '__main__':
