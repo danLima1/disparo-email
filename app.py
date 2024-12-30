@@ -77,7 +77,10 @@ def user_lookup_error_callback(jwt_header, jwt_payload):
     }), 401
 
 # Configuração de CORS para permitir credenciais
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": ["http://127.0.0.1:5500", "https://disparoemailfront.vercel.app"]}})
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": [
+    "http://127.0.0.1:5500",
+    "https://disparoemailfront.vercel.app"
+]}})
 
 # Definir a URL do banco de dados PostgreSQL
 DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
@@ -103,7 +106,10 @@ def admin_required(fn):
             return jsonify({'error': 'Erro ao verificar privilégios de usuário.'}), 500
     return wrapper
 
-# Função para enviar e-mail
+# -------------------------------------------------------------------
+# AJUSTE NA FUNÇÃO PARA ENVIAR E-MAIL
+# Agora ela retorna (success, error_message).
+# -------------------------------------------------------------------
 def enviar_email(subject, body, to_email, user_id):
     try:
         # Obter as configurações de email do usuário
@@ -117,16 +123,16 @@ def enviar_email(subject, body, to_email, user_id):
         if not result:
             conn.close()
             print("Usuário não encontrado.")
-            return False
+            return (False, "Usuário não encontrado.")
         smtp_server, smtp_port, email_username, email_password, from_name, credits = result
         if not smtp_server or not smtp_port or not email_username or not email_password:
             conn.close()
             print("Configuração de e-mail incompleta.")
-            return False
+            return (False, "Configuração de e-mail incompleta.")
         if credits <= 0:
             conn.close()
             print("Créditos insuficientes.")
-            return False
+            return (False, "Créditos insuficientes.")
 
         # Conectando ao servidor SMTP
         with smtplib.SMTP(smtp_server, smtp_port) as server:
@@ -149,43 +155,79 @@ def enviar_email(subject, body, to_email, user_id):
         c.execute('UPDATE users SET credits = %s WHERE id = %s', (new_credits, user_id))
         conn.commit()
         conn.close()
-        return True
+        return (True, None)  # Nenhum erro
     except Exception as e:
         print(f"Erro ao enviar o e-mail para {to_email}: {e}")
-        return False
+        return (False, str(e))
 
-# Função para enviar e-mails em uma thread separada
+# -------------------------------------------------------------------
+# CRIAÇÃO DA NOVA TABELA PARA LOG DE E-MAILS
+# -------------------------------------------------------------------
+def create_dispatch_email_log_table(cursor):
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS dispatch_email_log (
+            id SERIAL PRIMARY KEY,
+            dispatch_id INTEGER REFERENCES dispatch(id),
+            email TEXT,
+            success BOOLEAN,
+            error_message TEXT
+        )
+    ''')
+
+# -------------------------------------------------------------------
+# AJUSTE NA THREAD DE ENVIO PARA SALVAR LOG EM dispatch_email_log
+# -------------------------------------------------------------------
 def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     # Atualiza o status do disparo no banco de dados
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute('UPDATE dispatch SET status = %s, progress = %s, last_email = %s WHERE id = %s', ('executando', 0, '', dispatch_id))
+    c.execute('UPDATE dispatch SET status = %s, progress = %s, last_email = %s WHERE id = %s',
+              ('executando', 0, '', dispatch_id))
     conn.commit()
     conn.close()
 
     for idx, to_email in enumerate(emails_list):
         # Envia o e-mail
-        success = enviar_email(subject, body, to_email, user_id)
+        success, error_message = enviar_email(subject, body, to_email, user_id)
+
+        # Salva log de cada envio
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO dispatch_email_log (dispatch_id, email, success, error_message)
+            VALUES (%s, %s, %s, %s)
+        ''', (dispatch_id, to_email, success, error_message if error_message else None))
+        conn.commit()
+        conn.close()
+
         if not success:
             # Se não for possível enviar (por falta de créditos ou configuração), interrompe o envio
-            print("Interrompendo o envio por falta de créditos ou configuração de e-mail.")
+            print("Interrompendo o envio por falha na configuração ou créditos insuficientes.")
             break
+
         # Atualiza o progresso no banco de dados
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('UPDATE dispatch SET progress = %s, last_email = %s WHERE id = %s', (idx+1, to_email, dispatch_id))
+        c.execute('UPDATE dispatch SET progress = %s, last_email = %s WHERE id = %s',
+                  (idx + 1, to_email, dispatch_id))
         conn.commit()
         conn.close()
+
         # Aguarda 60 segundos se não for o último e-mail
         if idx < len(emails_list) - 1:
             time.sleep(60)
-    # Marca o disparo como concluído
+
+    # Marca o disparo como concluído (ou "concluído com erros" se não tiver enviado tudo)
+    final_status = 'concluído' if idx == len(emails_list) - 1 and success else 'concluído_com_erros'
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('concluído', dispatch_id))
+    c.execute('UPDATE dispatch SET status = %s WHERE id = %s', (final_status, dispatch_id))
     conn.commit()
     conn.close()
 
+# -------------------------------------------------------------------
+# FUNÇÃO DE INICIALIZAÇÃO DO BANCO (inclui nova tabela de LOGS)
+# -------------------------------------------------------------------
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -219,12 +261,14 @@ def init_db():
             )
         ''')
 
+        # Cria a tabela para log dos e-mails disparados
+        create_dispatch_email_log_table(c)
+
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"Erro ao inicializar o banco de dados: {e}")
 
-# Chama a inicialização do banco de dados
 init_db()
 
 # Rota de registro
@@ -249,7 +293,8 @@ def register():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('INSERT INTO users (email, password, role) VALUES (%s, %s, %s)', (email, hashed_password, role))
+        c.execute('INSERT INTO users (email, password, role) VALUES (%s, %s, %s)',
+                  (email, hashed_password, role))
         conn.commit()
         conn.close()
         return jsonify({'message': 'Usuário registrado com sucesso.'}), 200
@@ -323,7 +368,6 @@ def start_dispatch():
     from_name = request.form.get('from_name')  # Captura o nome do remetente
     uploaded_file = request.files.get('file')
 
-    # Corrigido: substituído '||' por 'or'
     if not subject or not email_body or not uploaded_file or not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
@@ -352,8 +396,10 @@ def start_dispatch():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('INSERT INTO dispatch (user_id, status, progress, total, last_email) VALUES (%s, %s, %s, %s, %s) RETURNING id',
-                  (user_id, 'pendente', 0, total_emails, ''))
+        c.execute('''
+            INSERT INTO dispatch (user_id, status, progress, total, last_email)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
+        ''', (user_id, 'pendente', 0, total_emails, ''))
         dispatch_id = c.fetchone()[0]
         conn.commit()
         conn.close()
@@ -363,9 +409,16 @@ def start_dispatch():
         return jsonify({'error': f'Erro ao iniciar o disparo: {e}'}), 500
 
     # Inicia a thread de envio de e-mails
-    threading.Thread(target=send_emails_thread, args=(emails_list, subject, email_body, dispatch_id, user_id)).start()
+    threading.Thread(
+        target=send_emails_thread,
+        args=(emails_list, subject, email_body, dispatch_id, user_id)
+    ).start()
 
-    return jsonify({'message': 'Disparo iniciado com sucesso.', 'total': total_emails, 'dispatch_id': dispatch_id}), 200
+    return jsonify({
+        'message': 'Disparo iniciado com sucesso.',
+        'total': total_emails,
+        'dispatch_id': dispatch_id
+    }), 200
 
 # Rota para obter o progresso do último disparo do usuário
 @app.route('/progress', methods=['GET'])
@@ -375,7 +428,13 @@ def get_progress():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('SELECT id, status, progress, total, last_email FROM dispatch WHERE user_id = %s ORDER BY id DESC LIMIT 1', (current_user_id,))
+        c.execute('''
+            SELECT id, status, progress, total, last_email
+            FROM dispatch
+            WHERE user_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+        ''', (current_user_id,))
         result = c.fetchone()
         conn.close()
         if result:
@@ -392,6 +451,134 @@ def get_progress():
     except Exception as e:
         print(f"Erro ao obter o progresso: {e}")
         return jsonify({'error': 'Erro ao obter o progresso.'}), 500
+
+# -------------------------------------------------------------------
+# NOVA ROTA PARA OBTER O PROGRESSO DE UM DISPARO ESPECÍFICO
+# -------------------------------------------------------------------
+@app.route('/dispatch/<int:dispatch_id>/progress', methods=['GET'])
+@jwt_required()
+def get_dispatch_progress(dispatch_id):
+    """
+    Retorna o status, progresso, total e último e-mail enviado
+    de um disparo específico.
+    """
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        # Verifica se o dispatch pertence ao usuário ou se o usuário é admin
+        c.execute('SELECT user_id FROM dispatch WHERE id = %s', (dispatch_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'error': 'Disparo não encontrado.'}), 404
+        
+        owner_id = row[0]
+        # Se não for o dono e não for admin, bloqueia
+        c.execute('SELECT role FROM users WHERE id = %s', (current_user_id,))
+        user_role = c.fetchone()[0]
+
+        if (str(owner_id) != str(current_user_id)) and (user_role != 'admin'):
+            conn.close()
+            return jsonify({'error': 'Acesso não autorizado.'}), 403
+        
+        # Retorna as informações do dispatch
+        c.execute('''
+            SELECT status, progress, total, last_email
+            FROM dispatch
+            WHERE id = %s
+        ''', (dispatch_id,))
+        result = c.fetchone()
+        conn.close()
+
+        if result:
+            status, progress, total, last_email = result
+            return jsonify({
+                'dispatch_id': dispatch_id,
+                'status': status,
+                'progress': progress,
+                'total': total,
+                'last_email': last_email
+            }), 200
+        else:
+            return jsonify({'error': 'Disparo não encontrado.'}), 404
+
+    except Exception as e:
+        print(f"Erro ao obter o progresso do disparo: {e}")
+        return jsonify({'error': 'Erro ao obter o progresso do disparo.'}), 500
+
+# -------------------------------------------------------------------
+# NOVA ROTA PARA OBTER CONTAGEM DE SUCESSOS, ERROS E LOG DE ERROS
+# -------------------------------------------------------------------
+@app.route('/dispatch/<int:dispatch_id>/results', methods=['GET'])
+@jwt_required()
+def get_dispatch_results(dispatch_id):
+    """
+    Retorna quantos e-mails tiveram sucesso, quantos tiveram erro
+    e a lista (email, error_message) dos que falharam.
+    """
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+
+        # Verifica se o dispatch pertence ao usuário ou se o usuário é admin
+        c.execute('SELECT user_id FROM dispatch WHERE id = %s', (dispatch_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'error': 'Disparo não encontrado.'}), 404
+        
+        owner_id = row[0]
+        # Se não for o dono e não for admin, bloqueia
+        c.execute('SELECT role FROM users WHERE id = %s', (current_user_id,))
+        user_role = c.fetchone()[0]
+
+        if (str(owner_id) != str(current_user_id)) and (user_role != 'admin'):
+            conn.close()
+            return jsonify({'error': 'Acesso não autorizado.'}), 403
+        
+        # Conta sucessos e erros
+        c.execute('''
+            SELECT COUNT(*) FROM dispatch_email_log
+            WHERE dispatch_id = %s AND success = TRUE
+        ''', (dispatch_id,))
+        success_count = c.fetchone()[0]
+
+        c.execute('''
+            SELECT COUNT(*) FROM dispatch_email_log
+            WHERE dispatch_id = %s AND success = FALSE
+        ''', (dispatch_id,))
+        error_count = c.fetchone()[0]
+
+        # Lista de erros
+        c.execute('''
+            SELECT email, error_message
+            FROM dispatch_email_log
+            WHERE dispatch_id = %s AND success = FALSE
+        ''', (dispatch_id,))
+        errors = c.fetchall()
+
+        conn.close()
+
+        # Monta a lista de erros (email, error_message)
+        error_logs = []
+        for email, error_msg in errors:
+            error_logs.append({
+                'email': email,
+                'error_message': error_msg
+            })
+
+        return jsonify({
+            'dispatch_id': dispatch_id,
+            'success_count': success_count,
+            'error_count': error_count,
+            'error_logs': error_logs
+        }), 200
+
+    except Exception as e:
+        print(f"Erro ao obter resultados do disparo: {e}")
+        return jsonify({'error': 'Erro ao obter resultados do disparo.'}), 500
 
 # Rota para verificar o token
 @app.route('/check_token', methods=['GET'])
@@ -468,7 +655,6 @@ def set_email_config():
     if not smtp_server or not smtp_port or not email_username or not email_password:
         return jsonify({'status': 'error', 'message': 'Dados incompletos.'}), 400
 
-    # Obtenha a identidade do usuário a partir do token
     current_user_id = get_jwt_identity()
 
     # Atualizar as configurações de email do usuário no banco de dados
@@ -497,7 +683,6 @@ def set_email_config():
 @app.route('/get_email_config', methods=['GET'])
 @jwt_required()
 def get_email_config():
-    # Obter as configurações de email do usuário
     current_user_id = get_jwt_identity()
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -530,35 +715,34 @@ def get_email_config():
 @admin_required
 def get_users():
     try:
-        # Parâmetros de paginação
         limit = request.args.get('limit', 10, type=int)
         offset = request.args.get('offset', 0, type=int)
         
-        # Estabelece a conexão com o banco de dados
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         
-        # Consulta SQL para selecionar apenas usuários com role 'user' com paginação
-        query = sql.SQL("SELECT id, email, credits FROM users WHERE role = %s ORDER BY id ASC LIMIT %s OFFSET %s")
+        # Consulta apenas usuários com role 'user', com paginação
+        query = sql.SQL("""
+            SELECT id, email, credits
+            FROM users
+            WHERE role = %s
+            ORDER BY id ASC
+            LIMIT %s OFFSET %s
+        """)
         c.execute(query, ('user', limit, offset))
         
         users = c.fetchall()
-        
-        # Fecha a conexão com o banco de dados
         conn.close()
         
-        # Converte os resultados em uma lista de dicionários
+        # Converte os resultados em lista de dicionários
         users_list = [{'id': user[0], 'email': user[1], 'credits': user[2]} for user in users]
         
         return jsonify(users_list), 200
 
     except psycopg2.Error as e:
-        # Log do erro (pode ser aprimorado para usar logging)
         print(f"Erro ao conectar ao banco de dados: {e}")
         return jsonify({'error': 'Erro interno do servidor.'}), 500
-
     except Exception as e:
-        # Log de outros erros
         print(f"Erro inesperado: {e}")
         return jsonify({'error': 'Ocorreu um erro inesperado.'}), 500
 
@@ -570,7 +754,6 @@ def add_credits():
     user_id = data.get('user_id')
     credits_to_add = data.get('credits')
 
-    # Corrigido: substituído '||' por 'or'
     if not user_id or credits_to_add is None:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
@@ -595,7 +778,9 @@ def add_credits():
         conn.commit()
         conn.close()
 
-        return jsonify({'message': f'{credits_to_add} créditos adicionados ao usuário {user_id}. Novo saldo: {new_credits}.'}), 200
+        return jsonify({
+            'message': f'{credits_to_add} créditos adicionados ao usuário {user_id}. Novo saldo: {new_credits}.'
+        }), 200
     except Exception as e:
         conn.rollback()
         conn.close()
@@ -620,7 +805,6 @@ def get_credits(user_id):
         print(f"Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
-# Inicializar o banco de dados
 if __name__ == '__main__':
     init_db()
     app.run(host='0.0.0.0', port=5000, debug=True)
