@@ -1,5 +1,9 @@
 flask
 flask-cors
+flask-login
 pandas
 openpyxl  # Necessário para leitura de arquivos Excel
+psycopg2-binary
 gunicorn
+werkzeug
+Flask-JWT-Extended
