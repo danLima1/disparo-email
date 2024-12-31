@@ -93,7 +93,7 @@ def user_lookup_error_callback(jwt_header, jwt_payload):
     }), 401
 
 # Definir a URL do banco de dados PostgreSQL
-DATABASE_URL = "postgresql://postgres:YOURPASSWORD@YOURHOST:5432/postgres"
+DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
 
 # Decorador para verificar se o usuário é administrador
 def admin_required(fn):
