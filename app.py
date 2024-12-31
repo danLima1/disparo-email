@@ -19,7 +19,15 @@ from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
-# Chave secreta para Flask e JWT
+CORS(app, 
+     supports_credentials=True, 
+     resources={r"/*": {"origins": [
+         "http://127.0.0.1:5500",
+         "https://disparoemailfront.vercel.app"
+     ]}},
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+)
 app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta chave segura!
 
 # Configurações do JWT
@@ -76,11 +84,7 @@ def user_lookup_error_callback(jwt_header, jwt_payload):
         'error': 'Erro ao buscar usuário.'
     }), 401
 
-# Configuração de CORS para permitir credenciais
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": [
-    "http://127.0.0.1:5500",
-    "https://disparoemailfront.vercel.app"
-]}})
+
 
 # Definir a URL do banco de dados PostgreSQL
 DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
