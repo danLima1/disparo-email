@@ -326,7 +326,8 @@ def create_dispatch_email_log_table(cursor):
     ''')
 
 # -------------------------------------------------------------------
-# THREAD que envia e-mails, agora chamando a função que valida.
+# THREAD que envia e-mails, agora chamando a função que valida
+#   e evitando interromper todo o processo se for só e-mail inválido.
 # -------------------------------------------------------------------
 def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     # Atualiza o status do disparo no banco de dados
@@ -351,12 +352,20 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.commit()
         conn.close()
 
+        # --- Aqui está a lógica de continuar ou parar ---
         if not success:
-            # Se não for possível enviar (por falta de créditos, config ou email inválido), interrompe
-            print("Interrompendo o envio por falha na configuração/créditos/validação.")
-            break
+            # Se for especificamente "Email inválido", continua para o próximo
+            if error_message and "Email inválido" in error_message:
+                print(f"E-mail inválido detectado ({to_email}). Pulando para o próximo.")
+                # Não incrementamos progress porque foi falha, mas
+                # se quiser contar falhas no progress, pode-se alterar
+                continue
+            else:
+                # Caso seja falta de créditos, config incorreta, etc., paramos o disparo
+                print("Interrompendo o envio por falha global (créditos, config, etc.).")
+                break
 
-        # Atualiza o progresso
+        # Se deu certo, atualiza o progresso
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('UPDATE dispatch SET progress = %s, last_email = %s WHERE id = %s',
@@ -364,12 +373,16 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.commit()
         conn.close()
 
-        # Aguarda 60 segundos se não for o último e-mail (ajuste se quiser menos/more)
+        # Aguarda 60 segundos se não for o último e-mail (ajuste se quiser)
         if idx < len(emails_list) - 1:
             time.sleep(60)
 
     # Marca o disparo como concluído (ou concluído com erros)
-    final_status = 'concluído' if idx == len(emails_list) - 1 and success else 'concluído_com_erros'
+    final_status = 'concluído'
+    if idx < len(emails_list) - 1:
+        # Se paramos antes de mandar todos (por algum erro global)
+        final_status = 'concluído_com_erros'
+
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute('UPDATE dispatch SET status = %s WHERE id = %s', (final_status, dispatch_id))
@@ -427,10 +440,6 @@ init_db()
 # -------------------------------------------------------------
 @app.route("/validate-email", methods=["POST"])
 def validate_email():
-    """
-    Endpoint que recebe um JSON {"email": "exemplo@dominio.com"}
-    e retorna o resultado das validações.
-    """
     data = request.get_json()
     if not data or "email" not in data:
         return jsonify({"error": "Requisição inválida. Informe um campo 'email'."}), 400
@@ -444,13 +453,11 @@ def validate_email():
 # -------------------------------------------------------------
 @app.route('/register', methods=['POST'])
 def register():
-    # Obter dados do formulário
     email = request.form.get('email')
     password = request.form.get('password')
     confirm_password = request.form.get('confirm_password')
-    role = request.form.get('role', 'user')  # papel, padrão 'user'
+    role = request.form.get('role', 'user')
 
-    # Validar dados
     if not email or not password or not confirm_password:
         return jsonify({'error': 'Por favor, preencha todos os campos.'}), 400
     if password != confirm_password:
@@ -519,12 +526,11 @@ def login():
         return jsonify({'error': f'Ocorreu um erro: {str(e)}'}), 500
 
 # -------------------------------------------------------------
-# ROTA QUE SEU FRONTEND CHAMA PARA INICIAR DISPARO: /start_dispatch
+# ROTA PARA INICIAR O DISPARO
 # -------------------------------------------------------------
 @app.route('/start_dispatch', methods=['POST'])
 @jwt_required()
 def start_dispatch():
-    # Obter a identidade do usuário a partir do token
     current_user = get_jwt_identity()
     user_id = current_user
 
@@ -536,13 +542,11 @@ def start_dispatch():
     if not subject or not email_body or not uploaded_file or not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
-    # Salva o arquivo
     if not os.path.exists('uploads'):
         os.makedirs('uploads')
     file_path = os.path.join('uploads', uploaded_file.filename)
     uploaded_file.save(file_path)
 
-    # Lê os e-mails do arquivo Excel
     try:
         emails_df = pd.read_excel(file_path)
     except Exception as e:
@@ -557,7 +561,6 @@ def start_dispatch():
     if total_emails == 0:
         return jsonify({'error': 'Nenhum e-mail encontrado na planilha.'}), 400
 
-    # Insere um novo disparo no banco de dados associado ao usuário
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
@@ -584,16 +587,6 @@ def start_dispatch():
         'total': total_emails,
         'dispatch_id': dispatch_id
     }), 200
-
-# -------------------------------------------------------------
-# ROTA EXEMPLO /send_emails (se você quiser usar para teste)
-# -------------------------------------------------------------
-@app.route('/send_emails', methods=['POST'])
-@jwt_required()
-def send_emails_manualmente():
-    data = request.get_json()
-    # Processar o envio de e-mails de maneira customizada
-    return jsonify({'message': 'Rota /send_emails executada com sucesso!'}), 200
 
 # -------------------------------------------------------------
 # Rota para obter o progresso do último disparo do usuário
