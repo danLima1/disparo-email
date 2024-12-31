@@ -8,7 +8,7 @@ import psycopg2
 from psycopg2 import sql, errors
 from datetime import timedelta
 from functools import wraps
-from flask_cors import CORS
+from flask_cors import CORS  # IMPORTANTE
 import os
 import threading
 import time
@@ -19,20 +19,28 @@ from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
-CORS(app, 
-     supports_credentials=True, 
-     resources={r"/*": {"origins": [
-         "http://127.0.0.1:5500",
-         "https://disparoemailfront.vercel.app"
-     ]}},
-     allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+# --------------------------------------------------
+# CONFIGURAÇÃO DE CORS
+# --------------------------------------------------
+# Permitir requisições de 'http://127.0.0.1:5500' e 'https://disparoemailfront.vercel.app'
+# Permitir cookies/credenciais, e permitir cabeçalhos e métodos específicos.
+CORS(
+    app,
+    resources={r"/*": {"origins": [
+        "http://127.0.0.1:5500",
+        "https://disparoemailfront.vercel.app"
+    ]}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 )
-app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'  # Mantenha esta chave segura!
+
+# Chave secreta para Flask e JWT
+app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'
 
 # Configurações do JWT
-app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'  # Substitua por uma chave secreta segura
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  # Tempo de expiração do token
+app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  
 app.config['JWT_ERROR_MESSAGE_KEY'] = 'error'
 app.config['JWT_BLACKLIST_ENABLED'] = False
 app.config['JWT_TOKEN_LOCATION'] = ['headers']
@@ -84,10 +92,8 @@ def user_lookup_error_callback(jwt_header, jwt_payload):
         'error': 'Erro ao buscar usuário.'
     }), 401
 
-
-
 # Definir a URL do banco de dados PostgreSQL
-DATABASE_URL = "postgresql://postgres:Evp5BZ0ZcriInfQG@oddly-sharp-nightcrawler.data-1.use1.tembo.io:5432/postgres"
+DATABASE_URL = "postgresql://postgres:YOURPASSWORD@YOURHOST:5432/postgres"
 
 # Decorador para verificar se o usuário é administrador
 def admin_required(fn):
@@ -358,7 +364,9 @@ def login():
         print(f"Erro no login: {str(e)}")  # Log para debug
         return jsonify({'error': f'Ocorreu um erro: {str(e)}'}), 500
 
-# Rota para iniciar o disparo de e-mails
+# -------------------------------------------------------------
+# ROTA QUE SEU FRONTEND CHAMA: /start_dispatch
+# -------------------------------------------------------------
 @app.route('/start_dispatch', methods=['POST'])
 @jwt_required()
 def start_dispatch():
@@ -424,7 +432,25 @@ def start_dispatch():
         'dispatch_id': dispatch_id
     }), 200
 
+# -------------------------------------------------------------
+# EXEMPLO DE ROTA /send_emails (CASO VOCÊ ESTEJA CHAMANDO)
+# -------------------------------------------------------------
+@app.route('/send_emails', methods=['POST'])
+@jwt_required()
+def send_emails_manualmente():
+    """
+    Esta rota é apenas um exemplo para demonstrar CORS em outro endpoint.
+    Se o seu frontend chama /send_emails, deixe esta rota.
+    Caso não use, remova esta rota ou ajuste seu frontend.
+    """
+    data = request.get_json()
+    # Processar o envio de e-mails de maneira customizada
+    return jsonify({'message': 'Rota /send_emails executada com sucesso!'}), 200
+
+
+# -------------------------------------------------------------
 # Rota para obter o progresso do último disparo do usuário
+# -------------------------------------------------------------
 @app.route('/progress', methods=['GET'])
 @jwt_required()
 def get_progress():
@@ -462,10 +488,6 @@ def get_progress():
 @app.route('/dispatch/<int:dispatch_id>/progress', methods=['GET'])
 @jwt_required()
 def get_dispatch_progress(dispatch_id):
-    """
-    Retorna o status, progresso, total e último e-mail enviado
-    de um disparo específico.
-    """
     current_user_id = get_jwt_identity()
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -517,10 +539,6 @@ def get_dispatch_progress(dispatch_id):
 @app.route('/dispatch/<int:dispatch_id>/results', methods=['GET'])
 @jwt_required()
 def get_dispatch_results(dispatch_id):
-    """
-    Retorna quantos e-mails tiveram sucesso, quantos tiveram erro
-    e a lista (email, error_message) dos que falharam.
-    """
     current_user_id = get_jwt_identity()
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -534,7 +552,6 @@ def get_dispatch_results(dispatch_id):
             return jsonify({'error': 'Disparo não encontrado.'}), 404
         
         owner_id = row[0]
-        # Se não for o dono e não for admin, bloqueia
         c.execute('SELECT role FROM users WHERE id = %s', (current_user_id,))
         user_role = c.fetchone()[0]
 
@@ -590,13 +607,13 @@ def get_dispatch_results(dispatch_id):
 def check_token():
     try:
         current_user_id = get_jwt_identity()
-        print(f"Token válido para o usuário ID: {current_user_id}")  # Log para depuração
-        print(f"Headers recebidos: {request.headers}")  # Log dos headers
-        print(f"Authorization header: {request.headers.get('Authorization')}")  # Log do token
+        print(f"Token válido para o usuário ID: {current_user_id}")  
+        print(f"Headers recebidos: {request.headers}")  
+        print(f"Authorization header: {request.headers.get('Authorization')}")  
 
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
-        c.execute('SELECT id, email, role FROM users WHERE id = %s', (int(current_user_id),))  # Convertendo para int
+        c.execute('SELECT id, email, role FROM users WHERE id = %s', (int(current_user_id),))  
         user = c.fetchone()
         conn.close()
 
@@ -609,18 +626,18 @@ def check_token():
                     'role': user[2]
                 }
             }
-            print(f"Resposta sendo enviada: {response_data}")  # Log da resposta
+            print(f"Resposta sendo enviada: {response_data}")
             return jsonify(response_data), 200
         else:
-            print(f"Usuário não encontrado para ID: {current_user_id}")  # Log de usuário não encontrado
+            print(f"Usuário não encontrado para ID: {current_user_id}")
             return jsonify({
                 'status': 'error',
                 'message': 'Usuário não encontrado'
             }), 404
 
     except Exception as e:
-        print(f"Erro na verificação do token: {str(e)}")  # Log detalhado do erro
-        print(f"Tipo do erro: {type(e)}")  # Log do tipo do erro
+        print(f"Erro na verificação do token: {str(e)}")
+        print(f"Tipo do erro: {type(e)}")
         return jsonify({
             'status': 'error',
             'message': f'Erro ao verificar o token: {str(e)}'
@@ -645,7 +662,7 @@ def get_my_credits():
         print(f"Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
-# Rota para configurar o e-mail do usuário (corrigida)
+# Rota para configurar o e-mail do usuário
 @app.route('/set_email_config', methods=['POST'])
 @jwt_required()
 def set_email_config():
@@ -811,4 +828,6 @@ def get_credits(user_id):
 
 if __name__ == '__main__':
     init_db()
+    # Rode em debug=True apenas para desenvolvimento local.
+    # No Render (produção), geralmente deixe debug=False.
     app.run(host='0.0.0.0', port=5000, debug=True)
