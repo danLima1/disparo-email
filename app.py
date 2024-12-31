@@ -23,17 +23,15 @@ app = Flask(__name__)
 # CONFIGURAÇÃO DE CORS
 # --------------------------------------------------
 # Permitir requisições de 'http://127.0.0.1:5500' e 'https://disparoemailfront.vercel.app'
-# Permitir cookies/credenciais, e permitir cabeçalhos e métodos específicos.
+
 CORS(
     app,
-    resources={r"/*": {"origins": [
-        "http://127.0.0.1:5500",
-        "https://disparoemailfront.vercel.app"
-    ]}},
+    resources={r"/*": {"origins": "*"}},
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 )
+
 
 # Chave secreta para Flask e JWT
 app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'
