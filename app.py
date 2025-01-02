@@ -24,10 +24,10 @@ from email.mime.text import MIMEText
 # AJUSTES DE TIMEOUT - IMPORTANTE
 # -------------------------------------------------------------------
 # Timeout do DNS
-dns.resolver.default_resolver.timeout = 5
-dns.resolver.default_resolver.lifetime = 5
+resolver = dns.resolver.get_default_resolver()
+resolver.timeout = 5
+resolver.lifetime = 5
 
-# Timeout de qualquer socket (inclui SMTP)
 socket.setdefaulttimeout(10)
 
 # --------------------------------------------------
