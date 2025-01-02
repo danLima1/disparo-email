@@ -20,11 +20,20 @@ import pandas as pd
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+# -------------------------------------------------------------------
+# AJUSTES DE TIMEOUT - IMPORTANTE
+# -------------------------------------------------------------------
+# Timeout do DNS
+dns.resolver.default_resolver.timeout = 5
+dns.resolver.default_resolver.lifetime = 5
+
+# Timeout de qualquer socket (inclui SMTP)
+socket.setdefaulttimeout(10)
+
 # --------------------------------------------------
 # CÓDIGO DE VALIDAÇÃO DE EMAILS
 # --------------------------------------------------
 
-# Exemplo de lista estática de domínios descartáveis
 DISPOSABLE_DOMAINS = {
     "mailinator.com",
     "temp-mail.org",
@@ -58,7 +67,7 @@ def has_mx_record(domain: str) -> bool:
 
 def smtp_verify(email: str) -> bool:
     """
-    Tenta verificar o e-mail utilizando SMTP.
+    Tenta verificar o e-mail utilizando SMTP, dentro dos timeouts definidos.
     Retorna True se o e-mail for considerado válido, False caso contrário.
     """
     domain = email.split('@')[-1]
@@ -70,13 +79,13 @@ def smtp_verify(email: str) -> bool:
         return False
 
     try:
-        server = smtplib.SMTP(mx_record)
+        # Note o timeout (socket.setdefaulttimeout(10) já cobre, mas explicitamos no construtor).
+        server = smtplib.SMTP(mx_record, 25, timeout=10)
         server.set_debuglevel(0)
         server.ehlo()
         server.starttls()
         server.ehlo()
 
-        # Ajustar o e-mail de teste se desejar
         server.mail("teste@seuservidor.com")
         code, message = server.rcpt(email)
         server.quit()
@@ -86,23 +95,8 @@ def smtp_verify(email: str) -> bool:
         else:
             return False
 
-    except smtplib.SMTPServerDisconnected:
-        print("Falha ao conectar-se ao servidor SMTP.")
-        return False
-    except smtplib.SMTPConnectError:
-        print("Erro de conexão SMTP.")
-        return False
-    except smtplib.SMTPHeloError:
-        print("Erro no HELO SMTP.")
-        return False
-    except smtplib.SMTPRecipientsRefused:
-        print("Recipiente SMTP recusado.")
-        return False
-    except smtplib.SMTPDataError:
-        print("Erro de dados SMTP.")
-        return False
     except Exception as e:
-        print(f"Erro desconhecido durante verificação SMTP: {e}")
+        print(f"Erro durante verificação SMTP: {e}")
         return False
 
 def validate_email_address(email: str):
@@ -138,7 +132,7 @@ def validate_email_address(email: str):
     # 4. Verificar registro MX
     mx_found = has_mx_record(domain)
 
-    # 5. Verificação SMTP
+    # 5. Verificação SMTP (só se não for descartável e tiver MX)
     smtp_valid = False
     if mx_found and not disposable:
         smtp_valid = smtp_verify(email)
@@ -175,7 +169,7 @@ app.secret_key = 'oaa3A5O24IfbsT-IxdMuOrnb-U2wHdGvjjVfkcSrcfA'
 
 # Configurações do JWT
 app.config['JWT_SECRET_KEY'] = 'krR8etmh1AcVb76G_NJkntEWZifilRRmiD1a5gA6Q1YEq1TgnZuxylJgKXzFwbBB'
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)  
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=2)
 app.config['JWT_ERROR_MESSAGE_KEY'] = 'error'
 app.config['JWT_BLACKLIST_ENABLED'] = False
 app.config['JWT_TOKEN_LOCATION'] = ['headers']
@@ -249,7 +243,7 @@ def admin_required(fn):
     return wrapper
 
 # -------------------------------------------------------------------
-# FUNÇÃO DE ENVIAR E-MAIL (agora com validação embutida)
+# FUNÇÃO DE ENVIAR E-MAIL (agora com validação embutida e timeouts)
 # -------------------------------------------------------------------
 def enviar_email(subject, body, to_email, user_id):
     """
@@ -273,20 +267,20 @@ def enviar_email(subject, body, to_email, user_id):
         result = c.fetchone()
         if not result:
             conn.close()
-            print("Usuário não encontrado.")
+            print("[DEBUG] Usuário não encontrado no banco de dados.")
             return (False, "Usuário não encontrado.")
         smtp_server, smtp_port, email_username, email_password, from_name, credits = result
         if not smtp_server or not smtp_port or not email_username or not email_password:
             conn.close()
-            print("Configuração de e-mail incompleta.")
+            print("[DEBUG] Configuração de e-mail incompleta para o usuário.")
             return (False, "Configuração de e-mail incompleta.")
         if credits <= 0:
             conn.close()
-            print("Créditos insuficientes.")
+            print("[DEBUG] Créditos insuficientes para o usuário.")
             return (False, "Créditos insuficientes.")
 
-        # Conectando ao servidor SMTP
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
+        # Conectando ao servidor SMTP (com timeout configurado no socket)
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
             server.starttls()
             server.login(email_username, email_password)
 
@@ -299,7 +293,7 @@ def enviar_email(subject, body, to_email, user_id):
 
             # Enviando o e-mail
             server.sendmail(email_username, to_email, msg.as_string())
-            print(f"E-mail enviado para {to_email}")
+            print(f"[DEBUG] E-mail enviado para {to_email}")
 
         # Deduz um crédito do usuário
         new_credits = credits - 1
@@ -308,7 +302,7 @@ def enviar_email(subject, body, to_email, user_id):
         conn.close()
         return (True, None)  # Nenhum erro
     except Exception as e:
-        print(f"Erro ao enviar o e-mail para {to_email}: {e}")
+        print(f"[DEBUG] Erro ao enviar o e-mail para {to_email}: {e}")
         return (False, str(e))
 
 # -------------------------------------------------------------------
@@ -328,6 +322,7 @@ def create_dispatch_email_log_table(cursor):
 # -------------------------------------------------------------------
 # THREAD que envia e-mails, agora chamando a função que valida
 #   e evitando interromper todo o processo se for só e-mail inválido.
+#   Com logs de depuração e menos tempo de sleep.
 # -------------------------------------------------------------------
 def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     # Atualiza o status do disparo no banco de dados
@@ -338,9 +333,13 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     conn.commit()
     conn.close()
 
+    print(f"[DEBUG] Iniciando thread de envio - Total de e-mails: {len(emails_list)}")
+
     for idx, to_email in enumerate(emails_list):
-        # Envia (e valida) o e-mail
+        print(f"[DEBUG] -> Enviando ({idx+1}/{len(emails_list)}) para: {to_email}")
+        
         success, error_message = enviar_email(subject, body, to_email, user_id)
+        print(f"[DEBUG] -> Resultado do envio: success={success}, error_message={error_message}")
 
         # Salva log de cada envio
         conn = psycopg2.connect(DATABASE_URL)
@@ -352,17 +351,16 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.commit()
         conn.close()
 
-        # --- Aqui está a lógica de continuar ou parar ---
+        # --- Lógica de continuar ou parar ---
         if not success:
             # Se for especificamente "Email inválido", continua para o próximo
             if error_message and "Email inválido" in error_message:
-                print(f"E-mail inválido detectado ({to_email}). Pulando para o próximo.")
-                # Não incrementamos progress porque foi falha, mas
-                # se quiser contar falhas no progress, pode-se alterar
+                print(f"[DEBUG] E-mail inválido detectado: {to_email}. Continuando para o próximo.")
+                # Não incrementa "progress" pois falhou
                 continue
             else:
-                # Caso seja falta de créditos, config incorreta, etc., paramos o disparo
-                print("Interrompendo o envio por falha global (créditos, config, etc.).")
+                # Caso seja falta de créditos, config incorreta, timeout, etc., paramos
+                print("[DEBUG] Interrompendo o envio por falha global (créditos, config, timeout etc.).")
                 break
 
         # Se deu certo, atualiza o progresso
@@ -373,14 +371,15 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.commit()
         conn.close()
 
-        # Aguarda 60 segundos se não for o último e-mail (ajuste se quiser)
+        # Espera 5 segundos se não for o último (pode ajustar conforme necessidade)
         if idx < len(emails_list) - 1:
-            time.sleep(60)
+            print("[DEBUG] Aguardando 5s antes do próximo envio...")
+            time.sleep(5)
 
-    # Marca o disparo como concluído (ou concluído com erros)
+    # Verifica se enviamos todos
     final_status = 'concluído'
     if idx < len(emails_list) - 1:
-        # Se paramos antes de mandar todos (por algum erro global)
+        # Se paramos antes de mandar todos
         final_status = 'concluído_com_erros'
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -388,6 +387,7 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     c.execute('UPDATE dispatch SET status = %s WHERE id = %s', (final_status, dispatch_id))
     conn.commit()
     conn.close()
+    print(f"[DEBUG] Fim da thread de envio. Status final: {final_status}")
 
 # -------------------------------------------------------------------
 # INICIALIZAÇÃO DO BANCO (inclui tabela dispatch_email_log)
@@ -502,13 +502,10 @@ def login():
 
         if user and check_password_hash(user[2], password):
             access_token = create_access_token(
-                identity=str(user[0]),  # Convertendo para string
-                additional_claims={
-                    'email': user[1],
-                    'role': user[3]
-                }
+                identity=str(user[0]),
+                additional_claims={'email': user[1], 'role': user[3]}
             )
-            print(f"Token gerado para usuário {user[1]}: {access_token}")
+            print(f"[DEBUG] Token gerado para usuário {user[1]}: {access_token}")
             return jsonify({
                 'message': 'Login realizado com sucesso.',
                 'access_token': access_token,
@@ -522,7 +519,7 @@ def login():
         else:
             return jsonify({'error': 'E-mail ou senha inválidos.'}), 400
     except Exception as e:
-        print(f"Erro no login: {str(e)}")
+        print(f"[DEBUG] Erro no login: {str(e)}")
         return jsonify({'error': f'Ocorreu um erro: {str(e)}'}), 500
 
 # -------------------------------------------------------------
@@ -542,8 +539,10 @@ def start_dispatch():
     if not subject or not email_body or not uploaded_file or not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
+    # Garante pasta de uploads
     if not os.path.exists('uploads'):
         os.makedirs('uploads')
+
     file_path = os.path.join('uploads', uploaded_file.filename)
     uploaded_file.save(file_path)
 
@@ -577,6 +576,7 @@ def start_dispatch():
         return jsonify({'error': f'Erro ao iniciar o disparo: {e}'}), 500
 
     # Inicia a thread de envio
+    print(f"[DEBUG] Chamando thread de envio: dispatch_id={dispatch_id}")
     threading.Thread(
         target=send_emails_thread,
         args=(emails_list, subject, email_body, dispatch_id, user_id)
@@ -619,7 +619,7 @@ def get_progress():
         else:
             return jsonify({'error': 'Nenhum disparo encontrado.'}), 404
     except Exception as e:
-        print(f"Erro ao obter o progresso: {e}")
+        print(f"[DEBUG] Erro ao obter o progresso: {e}")
         return jsonify({'error': 'Erro ao obter o progresso.'}), 500
 
 # -------------------------------------------------------------
@@ -667,7 +667,7 @@ def get_dispatch_progress(dispatch_id):
             return jsonify({'error': 'Disparo não encontrado.'}), 404
 
     except Exception as e:
-        print(f"Erro ao obter o progresso do disparo: {e}")
+        print(f"[DEBUG] Erro ao obter o progresso do disparo: {e}")
         return jsonify({'error': 'Erro ao obter o progresso do disparo.'}), 500
 
 # -------------------------------------------------------------
@@ -731,7 +731,7 @@ def get_dispatch_results(dispatch_id):
         }), 200
 
     except Exception as e:
-        print(f"Erro ao obter resultados do disparo: {e}")
+        print(f"[DEBUG] Erro ao obter resultados do disparo: {e}")
         return jsonify({'error': 'Erro ao obter resultados do disparo.'}), 500
 
 # -------------------------------------------------------------
@@ -742,9 +742,9 @@ def get_dispatch_results(dispatch_id):
 def check_token():
     try:
         current_user_id = get_jwt_identity()
-        print(f"Token válido para o usuário ID: {current_user_id}")  
-        print(f"Headers recebidos: {request.headers}")  
-        print(f"Authorization header: {request.headers.get('Authorization')}")  
+        print(f"[DEBUG] Token válido para o usuário ID: {current_user_id}")
+        print(f"[DEBUG] Headers recebidos: {request.headers}")
+        print(f"[DEBUG] Authorization header: {request.headers.get('Authorization')}")
 
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
@@ -761,17 +761,17 @@ def check_token():
                     'role': user[2]
                 }
             }
-            print(f"Resposta sendo enviada: {response_data}")
+            print(f"[DEBUG] Resposta sendo enviada: {response_data}")
             return jsonify(response_data), 200
         else:
-            print(f"Usuário não encontrado para ID: {current_user_id}")
+            print(f"[DEBUG] Usuário não encontrado para ID: {current_user_id}")
             return jsonify({
                 'status': 'error',
                 'message': 'Usuário não encontrado'
             }), 404
 
     except Exception as e:
-        print(f"Erro na verificação do token: {str(e)}")
+        print(f"[DEBUG] Erro na verificação do token: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': f'Erro ao verificar o token: {str(e)}'
@@ -795,7 +795,7 @@ def get_my_credits():
         else:
             return jsonify({'error': 'Usuário não encontrado.'}), 404
     except Exception as e:
-        print(f"Erro ao obter créditos: {e}")
+        print(f"[DEBUG] Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
 # -------------------------------------------------------------
@@ -830,12 +830,11 @@ def set_email_config():
         ''', (smtp_server, smtp_port, email_username, email_password, from_name, current_user_id))
         conn.commit()
         conn.close()
+        return jsonify({'status': 'success', 'message': 'Configuração de email atualizada com sucesso.'}), 200
     except Exception as e:
         conn.rollback()
         conn.close()
         return jsonify({'status': 'error', 'message': f'Erro ao atualizar configuração de email: {str(e)}'}), 500
-
-    return jsonify({'status': 'success', 'message': 'Configuração de email atualizada com sucesso.'}), 200
 
 # -------------------------------------------------------------
 # Rota para obter as configurações de e-mail do usuário
@@ -867,7 +866,7 @@ def get_email_config():
             return jsonify({'status': 'error', 'message': 'Usuário não encontrado'}), 404
 
     except Exception as e:
-        print(f"Erro ao obter configuração de email: {e}")
+        print(f"[DEBUG] Erro ao obter configuração de email: {e}")
         return jsonify({'status': 'error', 'message': 'Erro ao obter configuração de email.'}), 500
 
 # -------------------------------------------------------------
@@ -900,10 +899,10 @@ def get_users():
         return jsonify(users_list), 200
 
     except psycopg2.Error as e:
-        print(f"Erro ao conectar ao banco de dados: {e}")
+        print(f"[DEBUG] Erro ao conectar ao banco de dados: {e}")
         return jsonify({'error': 'Erro interno do servidor.'}), 500
     except Exception as e:
-        print(f"Erro inesperado: {e}")
+        print(f"[DEBUG] Erro inesperado: {e}")
         return jsonify({'error': 'Ocorreu um erro inesperado.'}), 500
 
 @app.route('/admin/add_credits', methods=['POST'])
@@ -960,7 +959,7 @@ def get_credits(user_id):
 
         return jsonify({'status': 'success', 'user_id': user_id, 'credits': user[0]}), 200
     except Exception as e:
-        print(f"Erro ao obter créditos: {e}")
+        print(f"[DEBUG] Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
 # -------------------------------------------------------------
