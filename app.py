@@ -336,6 +336,22 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     print(f"[DEBUG] Iniciando thread de envio - Total de e-mails: {len(emails_list)}")
 
     for idx, to_email in enumerate(emails_list):
+        # Verifica se o disparo foi parado
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT stopped FROM dispatch WHERE id = %s', (dispatch_id,))
+        stopped = c.fetchone()[0]
+        conn.close()
+
+        if stopped:
+            print(f"[DEBUG] Disparo {dispatch_id} foi parado manualmente.")
+            conn = psycopg2.connect(DATABASE_URL)
+            c = conn.cursor()
+            c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('parado', dispatch_id))
+            conn.commit()
+            conn.close()
+            return
+
         print(f"[DEBUG] -> Enviando ({idx+1}/{len(emails_list)}) para: {to_email}")
         
         success, error_message = enviar_email(subject, body, to_email, user_id)
@@ -421,12 +437,21 @@ def init_db():
                 status TEXT,
                 progress INTEGER,
                 total INTEGER,
-                last_email TEXT
+                last_email TEXT,
+                stopped BOOLEAN DEFAULT FALSE
             )
         ''')
 
         # Cria a tabela para log dos e-mails disparados
         create_dispatch_email_log_table(c)
+
+        # Adiciona a coluna stopped se não existir
+        try:
+            c.execute('ALTER TABLE dispatch ADD COLUMN IF NOT EXISTS stopped BOOLEAN DEFAULT FALSE')
+            conn.commit()
+        except Exception as e:
+            print(f"Erro ao adicionar coluna stopped: {e}")
+            conn.rollback()
 
         conn.commit()
         conn.close()
@@ -961,6 +986,52 @@ def get_credits(user_id):
     except Exception as e:
         print(f"[DEBUG] Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
+
+# -------------------------------------------------------------
+# Rota para parar um disparo em andamento
+# -------------------------------------------------------------
+@app.route('/dispatch/<int:dispatch_id>/stop', methods=['POST'])
+@jwt_required()
+def stop_dispatch(dispatch_id):
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+
+        # Verifica se o disparo existe e pertence ao usuário
+        c.execute('SELECT user_id, status FROM dispatch WHERE id = %s', (dispatch_id,))
+        result = c.fetchone()
+        if not result:
+            conn.close()
+            return jsonify({'error': 'Disparo não encontrado.'}), 404
+
+        owner_id, status = result
+        c.execute('SELECT role FROM users WHERE id = %s', (current_user_id,))
+        user_role = c.fetchone()[0]
+
+        # Verifica permissão
+        if (str(owner_id) != str(current_user_id)) and (user_role != 'admin'):
+            conn.close()
+            return jsonify({'error': 'Acesso não autorizado.'}), 403
+
+        # Verifica se o disparo está em andamento
+        if status != 'executando':
+            conn.close()
+            return jsonify({'error': 'Disparo não está em execução.'}), 400
+
+        # Marca o disparo como parado
+        c.execute('UPDATE dispatch SET stopped = TRUE WHERE id = %s', (dispatch_id,))
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            'message': 'Disparo será interrompido em breve.',
+            'dispatch_id': dispatch_id
+        }), 200
+
+    except Exception as e:
+        print(f"[DEBUG] Erro ao parar disparo: {e}")
+        return jsonify({'error': 'Erro ao parar disparo.'}), 500
 
 # -------------------------------------------------------------
 # MAIN
