@@ -345,7 +345,7 @@ def send_emails_thread(dispatch_id, user_id, subject, body):
         conn.close()
 
         # Espera 5s para o próximo
-        for _ in range(5):
+        for _ in range(40):
             time.sleep(1)
             # Checa se parou neste meio tempo
             conn = psycopg2.connect(DATABASE_URL)
