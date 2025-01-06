@@ -303,6 +303,7 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     print(f"[DEBUG] Iniciando thread de envio - Total de e-mails: {len(emails_list)}")
 
     for idx, to_email in enumerate(emails_list):
+        # Verifica se o disparo foi parado antes de cada envio
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('SELECT stopped FROM dispatch WHERE id = %s', (dispatch_id,))
@@ -321,6 +322,19 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         print(f"[DEBUG] -> Enviando ({idx+1}/{len(emails_list)}) para: {to_email}")
         success, error_message = enviar_email(subject, body, to_email, user_id)
         print(f"[DEBUG] -> Resultado do envio: success={success}, error_message={error_message}")
+
+        # Verifica novamente se foi parado após o envio
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT stopped FROM dispatch WHERE id = %s', (dispatch_id,))
+        stopped = c.fetchone()[0]
+        if stopped:
+            print(f"[DEBUG] Disparo {dispatch_id} foi parado manualmente após envio.")
+            c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('parado', dispatch_id))
+            conn.commit()
+            conn.close()
+            return
+        conn.close()
 
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
@@ -347,8 +361,22 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.close()
 
         if idx < len(emails_list) - 1:
-            print("[DEBUG] Aguardando 5s antes do próximo envio...")
-            time.sleep(5)
+            # Divide o sleep em intervalos menores para verificar o status stopped mais frequentemente
+            for _ in range(5):  # 5 segundos divididos em intervalos de 1 segundo
+                time.sleep(1)
+                conn = psycopg2.connect(DATABASE_URL)
+                c = conn.cursor()
+                c.execute('SELECT stopped FROM dispatch WHERE id = %s', (dispatch_id,))
+                stopped = c.fetchone()[0]
+                conn.close()
+                if stopped:
+                    print(f"[DEBUG] Disparo {dispatch_id} foi parado manualmente durante o intervalo.")
+                    conn = psycopg2.connect(DATABASE_URL)
+                    c = conn.cursor()
+                    c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('parado', dispatch_id))
+                    conn.commit()
+                    conn.close()
+                    return
 
     final_status = 'concluído'
     if idx < len(emails_list) - 1:
@@ -928,7 +956,7 @@ def stop_dispatch(dispatch_id):
         return jsonify({
             'message': 'Disparo será interrompido em breve.',
             'dispatch_id': dispatch_id
-        }), 200
+        }), 200 
 
     except Exception as e:
         print(f"[DEBUG] Erro ao parar disparo: {e}")
