@@ -24,9 +24,8 @@ from email.mime.text import MIMEText
 # AJUSTES DE TIMEOUT - IMPORTANTE
 # -------------------------------------------------------------------
 # Timeout do DNS
-resolver = dns.resolver.get_default_resolver()
-resolver.timeout = 5
-resolver.lifetime = 5
+dns.resolver.default_resolver.timeout = 5
+dns.resolver.default_resolver.lifetime = 5
 
 # Timeout de qualquer socket (inclui SMTP)
 socket.setdefaulttimeout(10)
@@ -80,7 +79,7 @@ def smtp_verify(email: str) -> bool:
         return False
 
     try:
-        # Construtor com timeout
+        # Note o timeout (socket.setdefaulttimeout(10) já cobre, mas explicitamos no construtor).
         server = smtplib.SMTP(mx_record, 25, timeout=10)
         server.set_debuglevel(0)
         server.ehlo()
@@ -244,7 +243,7 @@ def admin_required(fn):
     return wrapper
 
 # -------------------------------------------------------------------
-# FUNÇÃO DE ENVIAR E-MAIL COM VALIDAÇÃO
+# FUNÇÃO DE ENVIAR E-MAIL (agora com validação embutida e timeouts)
 # -------------------------------------------------------------------
 def enviar_email(subject, body, to_email, user_id):
     """
@@ -254,6 +253,7 @@ def enviar_email(subject, body, to_email, user_id):
     # Primeiro, validamos o e-mail com a função de validação unificada
     validation_result = validate_email_address(to_email)
     if not validation_result['valid_email']:
+        # Se for inválido, retornamos False com a razão
         return (False, f"Email inválido: {validation_result}")
 
     try:
@@ -300,22 +300,10 @@ def enviar_email(subject, body, to_email, user_id):
         c.execute('UPDATE users SET credits = %s WHERE id = %s', (new_credits, user_id))
         conn.commit()
         conn.close()
-        return (True, None)
+        return (True, None)  # Nenhum erro
     except Exception as e:
         print(f"[DEBUG] Erro ao enviar o e-mail para {to_email}: {e}")
         return (False, str(e))
-
-# -------------------------------------------------------------------
-# "WRAPPER" PARA CHAMAR enviar_email EM UMA THREAD
-# -------------------------------------------------------------------
-def enviar_email_threaded(subject, body, to_email, user_id, result_container):
-    """
-    Função que roda dentro da thread, chamando 'enviar_email' de fato
-    e guardando o resultado em result_container.
-    """
-    success, error = enviar_email(subject, body, to_email, user_id)
-    result_container["success"] = success
-    result_container["error_message"] = error
 
 # -------------------------------------------------------------------
 # Tabela para LOG dos e-mails
@@ -332,10 +320,12 @@ def create_dispatch_email_log_table(cursor):
     ''')
 
 # -------------------------------------------------------------------
-# THREAD QUE ENVIA EMAILS, COM TIMEOUT PARA PULAR O QUE "TRAVAR"
+# THREAD que envia e-mails, agora chamando a função que valida
+#   e evitando interromper todo o processo se for só e-mail inválido.
+#   Com logs de depuração e menos tempo de sleep.
 # -------------------------------------------------------------------
 def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
-    # Atualiza o status do disparo
+    # Atualiza o status do disparo no banco de dados
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute('UPDATE dispatch SET status = %s, progress = %s, last_email = %s WHERE id = %s',
@@ -345,38 +335,29 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
 
     print(f"[DEBUG] Iniciando thread de envio - Total de e-mails: {len(emails_list)}")
 
-    TIMEOUT_ENVIO = 65  # segundos para "pular" se travar
-
     for idx, to_email in enumerate(emails_list):
+        # Verifica se o disparo foi parado
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+        c.execute('SELECT stopped FROM dispatch WHERE id = %s', (dispatch_id,))
+        stopped = c.fetchone()[0]
+        conn.close()
+
+        if stopped:
+            print(f"[DEBUG] Disparo {dispatch_id} foi parado manualmente.")
+            conn = psycopg2.connect(DATABASE_URL)
+            c = conn.cursor()
+            c.execute('UPDATE dispatch SET status = %s WHERE id = %s', ('parado', dispatch_id))
+            conn.commit()
+            conn.close()
+            return
+
         print(f"[DEBUG] -> Enviando ({idx+1}/{len(emails_list)}) para: {to_email}")
-
-        # Preparar dicionário para receber o resultado
-        result_container = {"success": None, "error_message": None}
-
-        # Inicia thread para enviar e-mail
-        th = threading.Thread(
-            target=enviar_email_threaded,
-            args=(subject, body, to_email, user_id, result_container)
-        )
-        th.start()
-        th.join(TIMEOUT_ENVIO)  # Espera até 30s
-
-        # Se depois de 30s ainda estiver rodando, consideramos "travado"
-        if th.is_alive():
-            print(f"[DEBUG] Tempo excedido ({TIMEOUT_ENVIO}s) ao enviar para {to_email}, pulando este e-mail.")
-            # Vamos “forçar” o resultado como erro e seguir
-            success = False
-            error_message = "TIMEOUT: Skipping this email"
-            # Tentar encerrar a thread? No Python não há kill de thread, mas como está no socket, 
-            # ela vai terminar sozinha ao sofrer timeout do socket ou encerrar
-        else:
-            # Thread finalizou a tempo
-            success = result_container["success"]
-            error_message = result_container["error_message"]
-
+        
+        success, error_message = enviar_email(subject, body, to_email, user_id)
         print(f"[DEBUG] -> Resultado do envio: success={success}, error_message={error_message}")
 
-        # Registrar no dispatch_email_log
+        # Salva log de cada envio
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('''
@@ -386,15 +367,19 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.commit()
         conn.close()
 
-        # Decide se continua ou não
+        # --- Lógica de continuar ou parar ---
         if not success:
-            # Se for especificamente "Email inválido" ou "TIMEOUT" etc., vamos pular
-            # e continuar o disparo (para não travar toda a fila).
-            print(f"[DEBUG] Falha no e-mail {to_email}. Continuando com próximos e-mails.")
-            # Não incrementamos progress, apenas passamos ao próximo
-            continue
+            # Se for especificamente "Email inválido", continua para o próximo
+            if error_message and "Email inválido" in error_message:
+                print(f"[DEBUG] E-mail inválido detectado: {to_email}. Continuando para o próximo.")
+                # Não incrementa "progress" pois falhou
+                continue
+            else:
+                # Caso seja falta de créditos, config incorreta, timeout, etc., paramos
+                print("[DEBUG] Interrompendo o envio por falha global (créditos, config, timeout etc.).")
+                break
 
-        # Se deu certo, incrementa progresso
+        # Se deu certo, atualiza o progresso
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
         c.execute('UPDATE dispatch SET progress = %s, last_email = %s WHERE id = %s',
@@ -402,15 +387,16 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         conn.commit()
         conn.close()
 
-        # Exemplo: Aguarda 5 segundos entre cada envio (pode alterar)
+        # Espera 5 segundos se não for o último (pode ajustar conforme necessidade)
         if idx < len(emails_list) - 1:
-            print("[DEBUG] Aguardando 60s antes do próximo envio...")
-            time.sleep(60)
+            print("[DEBUG] Aguardando 5s antes do próximo envio...")
+            time.sleep(5)
 
-    # Concluiu o loop
+    # Verifica se enviamos todos
     final_status = 'concluído'
-    # Aqui, independentemente de falhas, vamos marcar como 'concluído'
-    # Se preferir diferenciar, poderia checar quantos e-mails foram sucesso e comparar
+    if idx < len(emails_list) - 1:
+        # Se paramos antes de mandar todos
+        final_status = 'concluído_com_erros'
 
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
@@ -420,14 +406,14 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
     print(f"[DEBUG] Fim da thread de envio. Status final: {final_status}")
 
 # -------------------------------------------------------------------
-# INICIALIZAÇÃO DO BANCO
+# INICIALIZAÇÃO DO BANCO (inclui tabela dispatch_email_log)
 # -------------------------------------------------------------------
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         c = conn.cursor()
 
-        # Cria a tabela 'users'
+        # Cria a tabela 'users' se não existir
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -443,7 +429,7 @@ def init_db():
             )
         ''')
 
-        # Cria a tabela 'dispatch'
+        # Cria a tabela 'dispatch' se não existir
         c.execute('''
             CREATE TABLE IF NOT EXISTS dispatch (
                 id SERIAL PRIMARY KEY,
@@ -451,12 +437,21 @@ def init_db():
                 status TEXT,
                 progress INTEGER,
                 total INTEGER,
-                last_email TEXT
+                last_email TEXT,
+                stopped BOOLEAN DEFAULT FALSE
             )
         ''')
 
-        # Cria a tabela de log de e-mails
+        # Cria a tabela para log dos e-mails disparados
         create_dispatch_email_log_table(c)
+
+        # Adiciona a coluna stopped se não existir
+        try:
+            c.execute('ALTER TABLE dispatch ADD COLUMN IF NOT EXISTS stopped BOOLEAN DEFAULT FALSE')
+            conn.commit()
+        except Exception as e:
+            print(f"Erro ao adicionar coluna stopped: {e}")
+            conn.rollback()
 
         conn.commit()
         conn.close()
@@ -466,7 +461,7 @@ def init_db():
 init_db()
 
 # -------------------------------------------------------------
-# ROTA QUE VALIDA EMAIL (opcional)
+# ROTA QUE VALIDA EMAIL (caso queira expor no seu sistema)
 # -------------------------------------------------------------
 @app.route("/validate-email", methods=["POST"])
 def validate_email():
@@ -479,7 +474,7 @@ def validate_email():
     return jsonify(result)
 
 # -------------------------------------------------------------
-# ROTA DE REGISTRO
+# ROTA DE REGISTRO DE USUÁRIOS
 # -------------------------------------------------------------
 @app.route('/register', methods=['POST'])
 def register():
@@ -513,7 +508,7 @@ def register():
         return jsonify({'error': f'Ocorreu um erro: {e}'}), 500
 
 # -------------------------------------------------------------
-# ROTA DE LOGIN
+# ROTA DE LOGIN DE USUÁRIOS
 # -------------------------------------------------------------
 @app.route('/login', methods=['POST'])
 def login():
@@ -569,6 +564,7 @@ def start_dispatch():
     if not subject or not email_body or not uploaded_file or not from_name:
         return jsonify({'error': 'Dados incompletos.'}), 400
 
+    # Garante pasta de uploads
     if not os.path.exists('uploads'):
         os.makedirs('uploads')
 
@@ -604,6 +600,7 @@ def start_dispatch():
         conn.close()
         return jsonify({'error': f'Erro ao iniciar o disparo: {e}'}), 500
 
+    # Inicia a thread de envio
     print(f"[DEBUG] Chamando thread de envio: dispatch_id={dispatch_id}")
     threading.Thread(
         target=send_emails_thread,
@@ -617,7 +614,7 @@ def start_dispatch():
     }), 200
 
 # -------------------------------------------------------------
-# ROTA PARA OBTER O PROGRESSO DO ÚLTIMO DISPARO
+# Rota para obter o progresso do último disparo do usuário
 # -------------------------------------------------------------
 @app.route('/progress', methods=['GET'])
 @jwt_required()
@@ -651,7 +648,7 @@ def get_progress():
         return jsonify({'error': 'Erro ao obter o progresso.'}), 500
 
 # -------------------------------------------------------------
-# ROTA PARA OBTER O PROGRESSO DE UM DISPARO ESPECÍFICO
+# Rota para obter o progresso de um disparo específico
 # -------------------------------------------------------------
 @app.route('/dispatch/<int:dispatch_id>/progress', methods=['GET'])
 @jwt_required()
@@ -699,7 +696,7 @@ def get_dispatch_progress(dispatch_id):
         return jsonify({'error': 'Erro ao obter o progresso do disparo.'}), 500
 
 # -------------------------------------------------------------
-# ROTA PARA OBTER RESULTADOS (SUCESSOS/ERROS)
+# Rota para obter contagem de sucessos, erros e logs de erros
 # -------------------------------------------------------------
 @app.route('/dispatch/<int:dispatch_id>/results', methods=['GET'])
 @jwt_required()
@@ -763,7 +760,7 @@ def get_dispatch_results(dispatch_id):
         return jsonify({'error': 'Erro ao obter resultados do disparo.'}), 500
 
 # -------------------------------------------------------------
-# ROTA PARA VERIFICAR O TOKEN
+# Rota para verificar o token
 # -------------------------------------------------------------
 @app.route('/check_token', methods=['GET'])
 @jwt_required()
@@ -806,7 +803,7 @@ def check_token():
         }), 500
 
 # -------------------------------------------------------------
-# ROTA PARA OBTER CRÉDITOS DO USUÁRIO
+# Rota para obter saldo de créditos do usuário
 # -------------------------------------------------------------
 @app.route('/get_my_credits', methods=['GET'])
 @jwt_required()
@@ -827,7 +824,7 @@ def get_my_credits():
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
 
 # -------------------------------------------------------------
-# ROTA PARA CONFIGURAR O EMAIL DO USUÁRIO (SMTP, ETC.)
+# Rota para configurar o e-mail do usuário (SMTP, etc.)
 # -------------------------------------------------------------
 @app.route('/set_email_config', methods=['POST'])
 @jwt_required()
@@ -865,7 +862,7 @@ def set_email_config():
         return jsonify({'status': 'error', 'message': f'Erro ao atualizar configuração de email: {str(e)}'}), 500
 
 # -------------------------------------------------------------
-# ROTA PARA OBTER CONFIGURAÇÕES DE EMAIL DO USUÁRIO
+# Rota para obter as configurações de e-mail do usuário
 # -------------------------------------------------------------
 @app.route('/get_email_config', methods=['GET'])
 @jwt_required()
@@ -989,6 +986,52 @@ def get_credits(user_id):
     except Exception as e:
         print(f"[DEBUG] Erro ao obter créditos: {e}")
         return jsonify({'error': 'Erro ao obter créditos.'}), 500
+
+# -------------------------------------------------------------
+# Rota para parar um disparo em andamento
+# -------------------------------------------------------------
+@app.route('/dispatch/<int:dispatch_id>/stop', methods=['POST'])
+@jwt_required()
+def stop_dispatch(dispatch_id):
+    current_user_id = get_jwt_identity()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        c = conn.cursor()
+
+        # Verifica se o disparo existe e pertence ao usuário
+        c.execute('SELECT user_id, status FROM dispatch WHERE id = %s', (dispatch_id,))
+        result = c.fetchone()
+        if not result:
+            conn.close()
+            return jsonify({'error': 'Disparo não encontrado.'}), 404
+
+        owner_id, status = result
+        c.execute('SELECT role FROM users WHERE id = %s', (current_user_id,))
+        user_role = c.fetchone()[0]
+
+        # Verifica permissão
+        if (str(owner_id) != str(current_user_id)) and (user_role != 'admin'):
+            conn.close()
+            return jsonify({'error': 'Acesso não autorizado.'}), 403
+
+        # Verifica se o disparo está em andamento
+        if status != 'executando':
+            conn.close()
+            return jsonify({'error': 'Disparo não está em execução.'}), 400
+
+        # Marca o disparo como parado
+        c.execute('UPDATE dispatch SET stopped = TRUE WHERE id = %s', (dispatch_id,))
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            'message': 'Disparo será interrompido em breve.',
+            'dispatch_id': dispatch_id
+        }), 200
+
+    except Exception as e:
+        print(f"[DEBUG] Erro ao parar disparo: {e}")
+        return jsonify({'error': 'Erro ao parar disparo.'}), 500
 
 # -------------------------------------------------------------
 # MAIN
