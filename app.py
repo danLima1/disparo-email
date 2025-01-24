@@ -36,7 +36,7 @@ socket.setdefaulttimeout(10)
 
 DISPOSABLE_DOMAINS = {
     "mailinator.com",
-    "temp-mail.org",
+    "temp-mail.org",Endereço Bairro
     "10minutemail.com",
     # Adicione outros domínios descartáveis aqui
 }
@@ -390,7 +390,7 @@ def send_emails_thread(emails_list, subject, body, dispatch_id, user_id):
         # Espera 5 segundos se não for o último (pode ajustar conforme necessidade)
         if idx < len(emails_list) - 1:
             print("[DEBUG] Aguardando 5s antes do próximo envio...")
-            time.sleep(5)
+            time.sleep(3)
 
     # Verifica se enviamos todos
     final_status = 'concluído'
